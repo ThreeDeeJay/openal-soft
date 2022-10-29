@@ -63,7 +63,7 @@ endif()
 
 
 IF(WIN32)
-    ADD_DEFINITIONS("-D_WIN32 -D_WIN32_WINNT=0x0502")
+    ADD_DEFINITIONS("-D_WIN32")
 
     OPTION(ALSOFT_BUILD_ROUTER  "Build the router (EXPERIMENTAL; creates OpenAL32.dll and soft_oal.dll)"  OFF)
 
@@ -574,7 +574,7 @@ ENDIF()
 
 
 # Check if we have Windows headers
-CHECK_INCLUDE_FILE(windows.h HAVE_WINDOWS_H -D_WIN32_WINNT=0x0502)
+CHECK_INCLUDE_FILE(windows.h HAVE_WINDOWS_H)
 IF(NOT HAVE_WINDOWS_H)
     CHECK_SYMBOL_EXISTS(gettimeofday sys/time.h HAVE_GETTIMEOFDAY)
     IF(NOT HAVE_GETTIMEOFDAY)
@@ -966,7 +966,7 @@ OPTION(ALSOFT_REQUIRE_DSOUND "Require DirectSound backend" OFF)
 OPTION(ALSOFT_REQUIRE_MMDEVAPI "Require MMDevApi backend" OFF)
 IF(HAVE_WINDOWS_H)
     # Check MMSystem backend
-    CHECK_INCLUDE_FILES("windows.h;mmsystem.h" HAVE_MMSYSTEM_H -D_WIN32_WINNT=0x0502)
+    CHECK_INCLUDE_FILES("windows.h;mmsystem.h" HAVE_MMSYSTEM_H)
     IF(HAVE_MMSYSTEM_H)
         CHECK_SHARED_FUNCTION_EXISTS(waveOutOpen "windows.h;mmsystem.h" winmm "" HAVE_LIBWINMM)
         IF(HAVE_LIBWINMM)
