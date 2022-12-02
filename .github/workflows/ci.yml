@@ -83,7 +83,8 @@ jobs:
         name: soft_oal-${{matrix.config.name}}
         path: ${{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll
 
-    - name: Upload artifacts & release assets
-      uses: nanoufo/action-upload-artifacts-and-release-assets@v1.4
+    - name: GitHub Upload Release Artifacts
+      uses: Roang-zero1/github-upload-release-artifacts-action@v3.0.0
       with:
-        path: ${{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll
+        # Allows to pass an already created tag, forces update_existing to true.
+        created_tag: # optional, default is 
