@@ -83,8 +83,11 @@ jobs:
         name: soft_oal-${{matrix.config.name}}
         path: ${{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll
 
-    - name: GitHub Upload Release Artifacts
-      uses: Roang-zero1/github-upload-release-artifacts-action@v3.0.0
+    - name: GitHub pre-release
+      uses: "marvinpinto/action-automatic-releases@latest"
       with:
-        # Allows to pass an already created tag, forces update_existing to true.
-        created_tag: # optional, default is 
+        repo_token: "${{secrets.GITHUB_TOKEN}}"
+        automatic_release_tag: "latest"
+        prerelease: true
+        title: "[${{env.CurrentDate}}] OpenAL Soft-${{env.CommitHash}}"
+        files: ${{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll
