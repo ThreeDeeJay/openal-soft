@@ -82,3 +82,6 @@ jobs:
       with:
         name: soft_oal-${{matrix.config.name}}
         path: ${{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll
+
+    - name: GitHub Releases
+      uses: fnkr/github-action-ghr@v1.3
