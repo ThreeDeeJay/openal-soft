@@ -83,5 +83,7 @@ jobs:
         name: soft_oal-${{matrix.config.name}}
         path: ${{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll
 
-    - name: GitHub Releases
-      uses: fnkr/github-action-ghr@v1.3
+    - name: Upload artifacts & release assets
+      uses: nanoufo/action-upload-artifacts-and-release-assets@v1.4
+      with:
+        path: ${{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll
