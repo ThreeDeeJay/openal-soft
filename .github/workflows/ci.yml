@@ -60,11 +60,11 @@ jobs:
 
     - name: Get current date
       run: |
-        "CurrentDate=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+        "CurrentDate=$(date +'%Y-%m-%d')" >> $env:GITHUB_ENV
 
     - name: Get commit hash
       run: |
-        "CommitHash=$(git rev-parse --short=7 HEAD)" >> $GITHUB_ENV
+        "CommitHash=$(git rev-parse --short=7 HEAD)" >> $env:GITHUB_ENV
 
     - name: Install Dependencies
       shell: bash
@@ -95,7 +95,7 @@ jobs:
       uses: "marvinpinto/action-automatic-releases@latest"
       with:
         repo_token: "${{secrets.GITHUB_TOKEN}}"
-        automatic_release_tag: "latest"
+        automatic_release_tag: "latest-${{matrix.config.name}}"
         prerelease: true
-        title: "[${{env.CurrentDate}}] OpenAL Soft-${{env.CommitHash}}"
-        files: "D:/a/openal-soft/openal-soft/build/Release/*.dll"
+        title: "[${{env.CurrentDate}}] OpenAL Soft ${{matrix.config.name}}-${{env.CommitHash}}"
+        files: "D:/a/openal-soft/openal-soft/build/Release/soft_oal.dll"
