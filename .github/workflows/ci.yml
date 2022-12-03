@@ -90,4 +90,4 @@ jobs:
         automatic_release_tag: "latest"
         prerelease: true
         title: "[${{env.CurrentDate}}] OpenAL Soft-${{env.CommitHash}}"
-        files: D:\a\openal-soft\openal-soft\build\Release\soft_oal.dll
+        files: "D:/a/openal-soft/openal-soft/build/Release/*.dll"
