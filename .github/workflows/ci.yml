@@ -58,6 +58,14 @@ jobs:
     steps:
     - uses: actions/checkout@v1
 
+    - name: Get current date
+      run: |
+        "CurrentDate=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+    - name: Get commit hash
+      run: |
+        "CommitHash=$(git rev-parse --short=7 HEAD)" >> $GITHUB_ENV
+
     - name: Install Dependencies
       shell: bash
       run: |
