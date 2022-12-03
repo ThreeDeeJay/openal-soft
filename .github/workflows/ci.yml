@@ -59,10 +59,12 @@ jobs:
     - uses: actions/checkout@v1
 
     - name: Get current date
+      if: ${{ matrix.config.os == 'windows-latest' }}
       run: |
         "CurrentDate=$(date +'%Y-%m-%d')" >> $env:GITHUB_ENV
 
     - name: Get commit hash
+      if: ${{ matrix.config.os == 'windows-latest' }}
       run: |
         "CommitHash=$(git rev-parse --short=7 HEAD)" >> $env:GITHUB_ENV
 
@@ -91,6 +93,12 @@ jobs:
         name: soft_oal-${{matrix.config.name}}
         path: ${{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll
 
+    - name: Copy DLL
+      shell: bash
+      run: |
+        mv "{{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll" "{{github.workspace}}/OpenAL32.dll"
+
+
     - name: GitHub pre-release
       uses: "marvinpinto/action-automatic-releases@latest"
       with:
@@ -98,4 +106,4 @@ jobs:
         automatic_release_tag: "latest-${{matrix.config.name}}"
         prerelease: true
         title: "[${{env.CurrentDate}}] OpenAL Soft ${{matrix.config.name}}-${{env.CommitHash}}"
-        files: "D:/a/openal-soft/openal-soft/build/Release/soft_oal.dll"
+        files: "soft_oal.dll"
