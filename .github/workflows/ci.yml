@@ -94,10 +94,9 @@ jobs:
         path: ${{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll
 
     - name: Copy DLL
-      shell: bash
+      if: ${{ matrix.config.os == 'windows-latest' }}
       run: |
-        mv "{{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll" "{{github.workspace}}/OpenAL32.dll"
-
+        copy "{{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll" "{{github.workspace}}/OpenAL32.dll"
 
     - name: GitHub pre-release
       uses: "marvinpinto/action-automatic-releases@latest"
