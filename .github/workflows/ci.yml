@@ -86,7 +86,6 @@ jobs:
         cmake --build build --config ${{matrix.config.build_type}}
 
     - name: Upload Archive
-      # Upload package as an artifact of this workflow.
       uses: actions/upload-artifact@v3.1.1
       if: ${{ matrix.config.os == 'windows-latest' }}
       with:
@@ -96,7 +95,7 @@ jobs:
     - name: Copy DLL
       if: ${{ matrix.config.os == 'windows-latest' }}
       run: |
-        copy "{{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll" "{{github.workspace}}/OpenAL32.dll"
+        copy "${{github.workspace}}/build/${{matrix.config.build_type}}/soft_oal.dll" "${{github.workspace}}/OpenAL32.dll"
 
     - name: GitHub pre-release
       uses: "marvinpinto/action-automatic-releases@latest"
