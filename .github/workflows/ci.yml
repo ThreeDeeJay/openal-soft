@@ -114,3 +114,28 @@ jobs:
       with:
         name: soft_oal-${{matrix.config.name}}
         path: build/archive
+
+    - name: Build
+      shell: bash
+      if: ${{ matrix.config.os == 'windows-latest' }}
+      run: |
+        git mv "build/archive/soft_oal-${{matrix.config.name}}" "build/archive/OpenAL32.dll"
+        git mv "alsoftrc.sample" "build/archive/alsoft.ini"
+
+    - name: Compress artifacts
+      uses: papeloto/action-zip@v1
+      if: ${{ matrix.config.os == 'windows-latest' }}
+      with:
+        files: "build/archive/"
+        dest: "build/archive/OpenALSoft.zip"
+        working-directory: ${{env.GITHUB_WORKSPACE}}
+
+    - name: GitHub pre-release
+      uses: "marvinpinto/action-automatic-releases@latest"
+      if: ${{ matrix.config.os == 'windows-latest' }}
+      with:
+        repo_token: "${{secrets.GITHUB_TOKEN}}"
+        automatic_release_tag: "latest-${{matrix.config.name}}"
+        prerelease: False
+        title: "OpenAL Soft"
+        files: "build/archive/OpenALSoft.zip"
