@@ -128,3 +128,19 @@ jobs:
       with:
         name: OpenALSoft-${{matrix.config.name}}
         path: build/release/${{matrix.config.name}}
+
+    - name: Compress artifacts
+      uses: papeloto/action-zip@v1
+      with:
+        files: "build/release/${{matrix.config.name}}/"
+        dest: "build/release/OpenALSoft.zip"
+        working-directory: ${{env.GITHUB_WORKSPACE}}
+
+    - name: GitHub pre-release
+      uses: "marvinpinto/action-automatic-releases@latest"
+      with:
+        repo_token: "${{secrets.GITHUB_TOKEN}}"
+        automatic_release_tag: "${{matrix.config.name}}"
+        prerelease: True
+        title: "OpenAL Soft ${{matrix.config.name}}"
+        files: "build/release/OpenALSoft.zip"
