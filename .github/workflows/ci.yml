@@ -114,3 +114,18 @@ jobs:
       with:
         name: soft_oal-${{matrix.config.name}}
         path: build/archive
+
+    - name: Create portable archive
+      if: ${{ matrix.config.os == 'windows-latest' }}
+      run: |
+        mkdir build/release
+        copy "build/${{matrix.config.build_type}}/soft_oal.dll" "build/release/OpenAL32.dll"
+        copy "alsoftrc.sample" "build/release/alsoft.ini"
+
+    - name: Upload portable artifact
+      # Upload package as an artifact of this workflow.
+      uses: actions/upload-artifact@v3.1.1
+      if: ${{ matrix.config.os == 'windows-latest' }}
+      with:
+        name: OpenALSoft-${{matrix.config.name}}
+        path: build/release
