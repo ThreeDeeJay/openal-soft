@@ -116,11 +116,10 @@ jobs:
         path: build/archive
 
     - name: Build
-      shell: bash
       if: ${{ matrix.config.os == 'windows-latest' }}
       run: |
-        git mv "build/Release/soft_oal.dll" "build/Release/OpenAL32.dll"
-        git mv "alsoftrc.sample" "build/Release/alsoft.ini"
+        copy "build/Release/soft_oal.dll" "build/Release/OpenAL32.dll"
+        copy "alsoftrc.sample" "build/Release/alsoft.ini"
 
     - name: Compress artifacts
       uses: vimtor/action-zip@v1.1
