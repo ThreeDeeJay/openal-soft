@@ -119,7 +119,7 @@ jobs:
       shell: bash
       if: ${{ matrix.config.os == 'windows-latest' }}
       run: |
-        git mv "build/archive/soft_oal-${{matrix.config.name}}" "build/archive/OpenAL32.dll"
+        git mv "build/archive/soft_oal.dll" "build/archive/OpenAL32.dll"
         git mv "alsoftrc.sample" "build/archive/alsoft.ini"
 
     - name: Compress artifacts
