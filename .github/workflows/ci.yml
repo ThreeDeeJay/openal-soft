@@ -119,15 +119,15 @@ jobs:
       shell: bash
       if: ${{ matrix.config.os == 'windows-latest' }}
       run: |
-        git mv "build/archive/soft_oal.dll" "build/archive/OpenAL32.dll"
-        git mv "alsoftrc.sample" "build/archive/alsoft.ini"
+        git mv "build/Release/soft_oal.dll" "build/Release/OpenAL32.dll"
+        git mv "alsoftrc.sample" "build/Release/alsoft.ini"
 
     - name: Compress artifacts
       uses: papeloto/action-zip@v1
       if: ${{ matrix.config.os == 'windows-latest' }}
       with:
-        files: "build/archive/"
-        dest: "build/archive/OpenALSoft.zip"
+        files: "build/Release/OpenAL32.dll" "build/Release/alsoft.ini"
+        dest: "build/Release/OpenALSoft.zip"
         working-directory: ${{env.GITHUB_WORKSPACE}}
 
     - name: GitHub pre-release
@@ -136,6 +136,6 @@ jobs:
       with:
         repo_token: "${{secrets.GITHUB_TOKEN}}"
         automatic_release_tag: "latest-${{matrix.config.name}}"
-        prerelease: False
+        prerelease: True
         title: "OpenAL Soft"
-        files: "build/archive/OpenALSoft.zip"
+        files: "build/Release/OpenALSoft.zip"
