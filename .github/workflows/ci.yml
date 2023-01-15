@@ -131,11 +131,11 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
-    if: ${{ github.ref == 'refs/heads/master' }}
+    runs-on: windows-latest
     steps:
 
     - name: Download artifacts
+      if: ${{ matrix.config.os == 'windows-latest' }}
       uses: actions/download-artifact@v2
       with:
         path: release
@@ -145,7 +145,7 @@ jobs:
       run: mkdir release
 
     - name: GitHub pre-release
-      if: ${{ github.ref == 'refs/heads/master' }}
+      if: ${{ matrix.config.os == 'windows-latest' }}
       uses: "marvinpinto/action-automatic-releases@latest"
       with:
         repo_token: "${{secrets.GITHUB_TOKEN}}"
