@@ -140,7 +140,7 @@ jobs:
         path: release
 
     - name: Create portable archive
-      run: mkdir release
+      run: New-Item "release" -ItemType Directory -Force
 
     - name: GitHub pre-release
       uses: "marvinpinto/action-automatic-releases@latest"
