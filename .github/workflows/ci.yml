@@ -134,13 +134,16 @@ jobs:
     runs-on: windows-latest
     steps:
 
+    - name: Create portable archive
+      run: New-Item "release" -ItemType Directory -Force
+
     - name: Download artifacts
       uses: actions/download-artifact@v2
       with:
         path: release
 
     - name: Create portable archive
-      run: New-Item "release" -ItemType Directory -Force
+      run: Get-ChildItem -Recurse "D:/a/openal-soft/openal-soft/release"
 
     - name: GitHub pre-release
       uses: "marvinpinto/action-automatic-releases@latest"
@@ -149,4 +152,4 @@ jobs:
         automatic_release_tag: "latest"
         prerelease: False
         title: "OpenAL Soft"
-        files: "release/*"
+        files: "D:/a/openal-soft/openal-soft/release/*"
