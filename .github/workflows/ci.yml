@@ -135,17 +135,14 @@ jobs:
     steps:
 
     - name: Download artifacts
-      if: ${{ matrix.config.os == 'windows-latest' }}
       uses: actions/download-artifact@v2
       with:
         path: release
 
     - name: Create portable archive
-      if: ${{ matrix.config.os == 'windows-latest' }}
       run: mkdir release
 
     - name: GitHub pre-release
-      if: ${{ matrix.config.os == 'windows-latest' }}
       uses: "marvinpinto/action-automatic-releases@latest"
       with:
         repo_token: "${{secrets.GITHUB_TOKEN}}"
