@@ -129,22 +129,20 @@ jobs:
         name: OpenALSoft-${{matrix.config.name}}
         path: build/release/${{matrix.config.name}}
 
-
-
   release:
     needs: build
     runs-on: ubuntu-latest
     if: ${{ github.ref == 'refs/heads/master' }}
+    steps:
+
+    - name: Download artifacts
+      uses: actions/download-artifact@v2
+      with:
+        path: release
 
     - name: Create portable archive
       if: ${{ matrix.config.os == 'windows-latest' }}
       run: mkdir release
-
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v2
-        with:
-          path: release
 
     - name: GitHub pre-release
       if: ${{ github.ref == 'refs/heads/master' }}
