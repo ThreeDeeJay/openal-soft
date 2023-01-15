@@ -137,13 +137,11 @@ jobs:
     - name: Create portable archive
       run: New-Item "release" -ItemType Directory -Force
 
-    - name: Download artifacts
-      uses: actions/download-artifact@v2
-      with:
-        path: release
+    - name: Artifact downloader
+      uses: bettermarks/action-artifact-download@0.4.0
 
     - name: Create portable archive
-      run: Get-ChildItem -Recurse "D:/a/openal-soft/openal-soft/release"
+      run: Get-ChildItem -Recurse "D:/a/openal-soft/openal-soft"
 
     - name: GitHub pre-release
       uses: "marvinpinto/action-automatic-releases@latest"
