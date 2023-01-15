@@ -129,18 +129,29 @@ jobs:
         name: OpenALSoft-${{matrix.config.name}}
         path: build/release/${{matrix.config.name}}
 
-    - name: Compress artifacts
-      uses: papeloto/action-zip@v1
-      with:
-        files: "build/release/${{matrix.config.name}}/"
-        dest: "build/release/OpenALSoft.zip"
-        working-directory: ${{env.GITHUB_WORKSPACE}}
+
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ github.ref == 'refs/heads/master' }}
+
+    - name: Create portable archive
+      if: ${{ matrix.config.os == 'windows-latest' }}
+      run: mkdir release
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v2
+        with:
+          path: release
 
     - name: GitHub pre-release
+      if: ${{ github.ref == 'refs/heads/master' }}
       uses: "marvinpinto/action-automatic-releases@latest"
       with:
         repo_token: "${{secrets.GITHUB_TOKEN}}"
         automatic_release_tag: "latest"
-        prerelease: True
-        title: "OpenAL Soft ${{matrix.config.name}}"
-        files: "build/release/OpenALSoft.zip"
+        prerelease: False
+        title: "OpenAL Soft"
+        files: "release/*"
