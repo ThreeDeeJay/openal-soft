@@ -714,13 +714,9 @@ FORCE_ALIGN int WasapiPlayback::mixerProc()
         mPadding.store(written, std::memory_order_relaxed);
 
         uint len{buffer_len - written};
-        if(len < update_size)
-        {
             DWORD res{WaitForSingleObjectEx(mNotifyEvent, 2000, FALSE)};
             if(res != WAIT_OBJECT_0)
                 ERR("WaitForSingleObjectEx error: 0x%lx\n", res);
-            continue;
-        }
 
         BYTE *buffer;
         hr = mRender->GetBuffer(len, &buffer);
@@ -1032,7 +1028,7 @@ HRESULT WasapiPlayback::resetProxy()
         OutputType.Format.nBlockAlign;
 
     TraceFormat("Requesting playback format", &OutputType.Format);
-    hr = mClient->IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, &OutputType.Format, &wfx);
+    hr = mClient->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &OutputType.Format, &wfx);
     if(FAILED(hr))
     {
         WARN("Failed to check format support: 0x%08lx\n", hr);
@@ -1164,8 +1160,17 @@ HRESULT WasapiPlayback::resetProxy()
 
     setDefaultWFXChannelOrder();
 
-    hr = mClient->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-        buf_time.count(), 0, &OutputType.Format, nullptr);
+    REFERENCE_TIME hnsRequestedDuration = 0;
+    if (FAILED(hr))
+    {
+        ERR("Wooooooow: 0x%08lx\n", hr);
+        return hr;
+    }
+    hr = mClient->GetDevicePeriod(NULL, &hnsRequestedDuration);
+    hr = mClient->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        buf_time.count(), buf_time.count(), &OutputType.Format, nullptr);
+    unsigned int buffersize = 0;
+    mClient->GetBufferSize(&buffersize);
     if(FAILED(hr))
     {
         ERR("Failed to initialize audio client: 0x%08lx\n", hr);
@@ -1186,31 +1191,8 @@ HRESULT WasapiPlayback::resetProxy()
     /* Find the nearest multiple of the period size to the update size */
     if(min_per < per_time)
         min_per *= maxi64((per_time + min_per/2) / min_per, 1);
-
-    mOrigBufferSize = buffer_len;
-    mOrigUpdateSize = minu(RefTime2Samples(min_per, mFormat.Format.nSamplesPerSec), buffer_len/2);
-
-    mDevice->BufferSize = static_cast<uint>(uint64_t{buffer_len} * mDevice->Frequency /
-        mFormat.Format.nSamplesPerSec);
-    mDevice->UpdateSize = minu(RefTime2Samples(min_per, mDevice->Frequency),
-        mDevice->BufferSize/2);
-
-    mResampler = nullptr;
-    mResampleBuffer = nullptr;
-    mBufferFilled = 0;
-    if(mDevice->Frequency != mFormat.Format.nSamplesPerSec)
-    {
-        mResampler = SampleConverter::Create(mDevice->FmtType, mDevice->FmtType,
-            mFormat.Format.nChannels, mDevice->Frequency, mFormat.Format.nSamplesPerSec,
-            Resampler::FastBSinc24);
-        mResampleBuffer = std::make_unique<char[]>(size_t{mDevice->UpdateSize} *
-            mFormat.Format.nChannels * mFormat.Format.wBitsPerSample / 8);
-
-        TRACE("Created converter for %s/%s format, dst: %luhz (%u), src: %uhz (%u)\n",
-            DevFmtChannelsString(mDevice->FmtChans), DevFmtTypeString(mDevice->FmtType),
-            mFormat.Format.nSamplesPerSec, mOrigUpdateSize, mDevice->Frequency,
-            mDevice->UpdateSize);
-    }
+    mDevice->UpdateSize = buffer_len;
+    mDevice->BufferSize = buffer_len * 2;
 
     hr = mClient->SetEventHandle(mNotifyEvent);
     if(FAILED(hr))
