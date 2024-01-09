@@ -79,36 +79,32 @@
 #ifndef PFFFT_H
 #define PFFFT_H
 
-#include <stddef.h> // for size_t
-#include <stdint.h>
+#include <cstddef>
+#include <cstdint>
+#include <utility>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "almalloc.h"
+
 
 /* opaque struct holding internal stuff (precomputed twiddle factors) this
  * struct can be shared by many threads as it contains only read-only data.
  */
-typedef struct PFFFT_Setup PFFFT_Setup;
-
-#ifndef PFFFT_COMMON_ENUMS
-#define PFFFT_COMMON_ENUMS
+struct PFFFT_Setup;
 
 /* direction of the transform */
-typedef enum { PFFFT_FORWARD, PFFFT_BACKWARD } pffft_direction_t;
+enum pffft_direction_t { PFFFT_FORWARD, PFFFT_BACKWARD };
 
 /* type of transform */
-typedef enum { PFFFT_REAL, PFFFT_COMPLEX } pffft_transform_t;
-
-#endif
+enum pffft_transform_t { PFFFT_REAL, PFFFT_COMPLEX };
 
 /**
  * Prepare for performing transforms of size N -- the returned PFFFT_Setup
  * structure is read-only so it can safely be shared by multiple concurrent
  * threads.
  */
-PFFFT_Setup *pffft_new_setup(unsigned int N, pffft_transform_t transform);
-void pffft_destroy_setup(PFFFT_Setup *setup);
+[[gnu::malloc]]
+gsl::owner<PFFFT_Setup*> pffft_new_setup(unsigned int N, pffft_transform_t transform);
+void pffft_destroy_setup(gsl::owner<PFFFT_Setup*> setup) noexcept;
 
 /**
  * Perform a Fourier transform. The z-domain data is stored in the most
@@ -126,7 +122,7 @@ void pffft_destroy_setup(PFFFT_Setup *setup);
  *
  * The input and output parameters may alias.
  */
-void pffft_transform(PFFFT_Setup *setup, const float *input, float *output, float *work, pffft_direction_t direction);
+void pffft_transform(const PFFFT_Setup *setup, const float *input, float *output, float *work, pffft_direction_t direction);
 
 /**
  * Similar to pffft_transform, but handles the complex values in the usual form
@@ -138,7 +134,7 @@ void pffft_transform(PFFFT_Setup *setup, const float *input, float *output, floa
  *
  * The input and output parameters may alias.
  */
-void pffft_transform_ordered(PFFFT_Setup *setup, const float *input, float *output, float *work, pffft_direction_t direction);
+void pffft_transform_ordered(const PFFFT_Setup *setup, const float *input, float *output, float *work, pffft_direction_t direction);
 
 /**
  * Reorder the z-domain data. For PFFFT_FORWARD, it reorders from the internal
@@ -149,7 +145,7 @@ void pffft_transform_ordered(PFFFT_Setup *setup, const float *input, float *outp
  *
  * The input and output parameters should not alias.
  */
-void pffft_zreorder(PFFFT_Setup *setup, const float *input, float *output, pffft_direction_t direction);
+void pffft_zreorder(const PFFFT_Setup *setup, const float *input, float *output, pffft_direction_t direction);
 
 /**
  * Perform a multiplication of the z-domain data in dft_a and dft_b, and scale
@@ -162,7 +158,7 @@ void pffft_zreorder(PFFFT_Setup *setup, const float *input, float *output, pffft
  *
  * The dft_a, dft_b, and dft_ab parameters may alias.
  */
-void pffft_zconvolve_scale_accumulate(PFFFT_Setup *setup, const float *dft_a, const float *dft_b, float *dft_ab, float scaling);
+void pffft_zconvolve_scale_accumulate(const PFFFT_Setup *setup, const float *dft_a, const float *dft_b, float *dft_ab, float scaling);
 
 /**
  * Perform a multiplication of the z-domain data in dft_a and dft_b, and
@@ -172,21 +168,49 @@ void pffft_zconvolve_scale_accumulate(PFFFT_Setup *setup, const float *dft_a, co
  *
  * The dft_a, dft_b, and dft_ab parameters may alias.
  */
-void pffft_zconvolve_accumulate(PFFFT_Setup *setup, const float *dft_a, const float *dft_b, float *dft_ab);
+void pffft_zconvolve_accumulate(const PFFFT_Setup *setup, const float *dft_a, const float *dft_b, float *dft_ab);
 
-/**
- * The float buffers must have the correct alignment (16-byte boundary on intel
- * and powerpc). This function may be used to obtain such correctly aligned
- * buffers.
- */
-void *pffft_aligned_malloc(size_t nb_bytes);
-void pffft_aligned_free(void *ptr);
 
-/* Return 4 or 1 depending if vectorization was enable when building pffft.cpp. */
-int pffft_simd_size();
+struct PFFFTSetup {
+    gsl::owner<PFFFT_Setup*> mSetup{};
 
-#ifdef __cplusplus
-}
-#endif
+    PFFFTSetup() = default;
+    PFFFTSetup(const PFFFTSetup&) = delete;
+    PFFFTSetup(PFFFTSetup&& rhs) noexcept : mSetup{rhs.mSetup} { rhs.mSetup = nullptr; }
+    explicit PFFFTSetup(std::nullptr_t) noexcept { }
+    explicit PFFFTSetup(unsigned int n, pffft_transform_t transform)
+        : mSetup{pffft_new_setup(n, transform)}
+    { }
+    ~PFFFTSetup() { if(mSetup) pffft_destroy_setup(mSetup); }
+
+    PFFFTSetup& operator=(const PFFFTSetup&) = delete;
+    PFFFTSetup& operator=(PFFFTSetup&& rhs) noexcept
+    {
+        if(mSetup)
+            pffft_destroy_setup(mSetup);
+        mSetup = rhs.mSetup;
+        rhs.mSetup = nullptr;
+        return *this;
+    }
+
+    void transform(const float *input, float *output, float *work, pffft_direction_t direction) const
+    { pffft_transform(mSetup, input, output, work, direction); }
+
+    void transform_ordered(const float *input, float *output, float *work,
+        pffft_direction_t direction) const
+    { pffft_transform_ordered(mSetup, input, output, work, direction); }
+
+    void zreorder(const float *input, float *output, pffft_direction_t direction) const
+    { pffft_zreorder(mSetup, input, output, direction); }
+
+    void zconvolve_scale_accumulate(const float *dft_a, const float *dft_b, float *dft_ab,
+        float scaling) const
+    { pffft_zconvolve_scale_accumulate(mSetup, dft_a, dft_b, dft_ab, scaling); }
+
+    void zconvolve_accumulate(const float *dft_a, const float *dft_b, float *dft_ab) const
+    { pffft_zconvolve_accumulate(mSetup, dft_a, dft_b, dft_ab); }
+
+    [[nodiscard]] operator bool() const noexcept { return mSetup != nullptr; }
+};
 
 #endif // PFFFT_H

@@ -13,12 +13,13 @@
 #include "atomic.h"
 #include "ambidefs.h"
 #include "bufferline.h"
-#include "mixer/hrtfdefs.h"
+#include "flexarray.h"
 #include "intrusive_ptr.h"
+#include "mixer/hrtfdefs.h"
 
 
-struct HrtfStore {
-    RefCount mRef;
+struct alignas(16) HrtfStore {
+    std::atomic<uint> mRef;
 
     uint mSampleRate : 24;
     uint mIrSize : 8;
@@ -46,7 +47,14 @@ struct HrtfStore {
     void add_ref();
     void dec_ref();
 
-    DEF_PLACE_NEWDEL()
+    void *operator new(size_t) = delete;
+    void *operator new[](size_t) = delete;
+    void operator delete[](void*) noexcept = delete;
+
+    void operator delete(gsl::owner<void*> block, void*) noexcept
+    { ::operator delete[](block, std::align_val_t{alignof(HrtfStore)}); }
+    void operator delete(gsl::owner<void*> block) noexcept
+    { ::operator delete[](block, std::align_val_t{alignof(HrtfStore)}); }
 };
 using HrtfStorePtr = al::intrusive_ptr<HrtfStore>;
 
@@ -60,7 +68,7 @@ struct AngularPoint {
 
 
 struct DirectHrtfState {
-    std::array<float,BufferLineSize> mTemp;
+    std::array<float,BufferLineSize> mTemp{};
 
     /* HRTF filter state for dry buffer content */
     uint mIrSize{0};
@@ -74,7 +82,8 @@ struct DirectHrtfState {
      * are ordered and scaled according to the matrix input.
      */
     void build(const HrtfStore *Hrtf, const uint irSize, const bool perHrirMin,
-        const al::span<const AngularPoint> AmbiPoints, const float (*AmbiMatrix)[MaxAmbiChannels],
+        const al::span<const AngularPoint> AmbiPoints,
+        const al::span<const std::array<float,MaxAmbiChannels>> AmbiMatrix,
         const float XOverFreq, const al::span<const float,MaxAmbiOrder+1> AmbiOrderHFGain);
 
     static std::unique_ptr<DirectHrtfState> Create(size_t num_chans);

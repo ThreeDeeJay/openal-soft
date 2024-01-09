@@ -9,7 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
-#include <limits.h>
+#include <climits>
 
 #include "albit.h"
 #include "alnumeric.h"
@@ -24,26 +24,23 @@ static_assert((BufferLineSize-1)/MaxPitch > 0, "MaxPitch is too large for Buffer
 static_assert((INT_MAX>>MixerFracBits)/MaxPitch > BufferLineSize,
     "MaxPitch and/or BufferLineSize are too large for MixerFracBits!");
 
-/* Base template left undefined. Should be marked =delete, but Clang 3.8.1
- * chokes on that given the inline specializations.
- */
 template<DevFmtType T>
-inline float LoadSample(DevFmtType_t<T> val) noexcept;
+constexpr float LoadSample(DevFmtType_t<T> val) noexcept = delete;
 
-template<> inline float LoadSample<DevFmtByte>(DevFmtType_t<DevFmtByte> val) noexcept
-{ return val * (1.0f/128.0f); }
-template<> inline float LoadSample<DevFmtShort>(DevFmtType_t<DevFmtShort> val) noexcept
-{ return val * (1.0f/32768.0f); }
-template<> inline float LoadSample<DevFmtInt>(DevFmtType_t<DevFmtInt> val) noexcept
+template<> constexpr float LoadSample<DevFmtByte>(DevFmtType_t<DevFmtByte> val) noexcept
+{ return float(val) * (1.0f/128.0f); }
+template<> constexpr float LoadSample<DevFmtShort>(DevFmtType_t<DevFmtShort> val) noexcept
+{ return float(val) * (1.0f/32768.0f); }
+template<> constexpr float LoadSample<DevFmtInt>(DevFmtType_t<DevFmtInt> val) noexcept
 { return static_cast<float>(val) * (1.0f/2147483648.0f); }
-template<> inline float LoadSample<DevFmtFloat>(DevFmtType_t<DevFmtFloat> val) noexcept
+template<> constexpr float LoadSample<DevFmtFloat>(DevFmtType_t<DevFmtFloat> val) noexcept
 { return val; }
 
-template<> inline float LoadSample<DevFmtUByte>(DevFmtType_t<DevFmtUByte> val) noexcept
+template<> constexpr float LoadSample<DevFmtUByte>(DevFmtType_t<DevFmtUByte> val) noexcept
 { return LoadSample<DevFmtByte>(static_cast<int8_t>(val - 128)); }
-template<> inline float LoadSample<DevFmtUShort>(DevFmtType_t<DevFmtUShort> val) noexcept
+template<> constexpr float LoadSample<DevFmtUShort>(DevFmtType_t<DevFmtUShort> val) noexcept
 { return LoadSample<DevFmtShort>(static_cast<int16_t>(val - 32768)); }
-template<> inline float LoadSample<DevFmtUInt>(DevFmtType_t<DevFmtUInt> val) noexcept
+template<> constexpr float LoadSample<DevFmtUInt>(DevFmtType_t<DevFmtUInt> val) noexcept
 { return LoadSample<DevFmtInt>(static_cast<int32_t>(val - 2147483648u)); }
 
 
@@ -51,7 +48,7 @@ template<DevFmtType T>
 inline void LoadSampleArray(float *RESTRICT dst, const void *src, const size_t srcstep,
     const size_t samples) noexcept
 {
-    const DevFmtType_t<T> *ssrc = static_cast<const DevFmtType_t<T>*>(src);
+    auto *ssrc = static_cast<const DevFmtType_t<T>*>(src);
     for(size_t i{0u};i < samples;i++)
         dst[i] = LoadSample<T>(ssrc[i*srcstep]);
 }
@@ -99,7 +96,7 @@ template<DevFmtType T>
 inline void StoreSampleArray(void *dst, const float *RESTRICT src, const size_t dststep,
     const size_t samples) noexcept
 {
-    DevFmtType_t<T> *sdst = static_cast<DevFmtType_t<T>*>(dst);
+    auto *sdst = static_cast<DevFmtType_t<T>*>(dst);
     for(size_t i{0u};i < samples;i++)
         sdst[i*dststep] = StoreSample<T>(src[i]);
 }
@@ -127,7 +124,7 @@ void StoreSamples(void *dst, const float *src, const size_t dststep, const DevFm
 template<DevFmtType T>
 void Mono2Stereo(float *RESTRICT dst, const void *src, const size_t frames) noexcept
 {
-    const DevFmtType_t<T> *ssrc = static_cast<const DevFmtType_t<T>*>(src);
+    auto *ssrc = static_cast<const DevFmtType_t<T>*>(src);
     for(size_t i{0u};i < frames;i++)
         dst[i*2 + 1] = dst[i*2 + 0] = LoadSample<T>(ssrc[i]) * 0.707106781187f;
 }
@@ -136,7 +133,7 @@ template<DevFmtType T>
 void Multi2Mono(uint chanmask, const size_t step, const float scale, float *RESTRICT dst,
     const void *src, const size_t frames) noexcept
 {
-    const DevFmtType_t<T> *ssrc = static_cast<const DevFmtType_t<T>*>(src);
+    auto *ssrc = static_cast<const DevFmtType_t<T>*>(src);
     std::fill_n(dst, frames, 0.0f);
     for(size_t c{0};chanmask;++c)
     {
@@ -216,8 +213,8 @@ uint SampleConverter::availableOut(uint srcframes) const
 
 uint SampleConverter::convert(const void **src, uint *srcframes, void *dst, uint dstframes)
 {
-    const uint SrcFrameSize{static_cast<uint>(mChan.size()) * mSrcTypeSize};
-    const uint DstFrameSize{static_cast<uint>(mChan.size()) * mDstTypeSize};
+    const size_t SrcFrameSize{mChan.size() * mSrcTypeSize};
+    const size_t DstFrameSize{mChan.size() * mDstTypeSize};
     const uint increment{mIncrement};
     auto SamplesIn = static_cast<const std::byte*>(*src);
     uint NumSrcSamples{*srcframes};
@@ -243,8 +240,8 @@ uint SampleConverter::convert(const void **src, uint *srcframes, void *dst, uint
             break;
         }
 
-        float *RESTRICT SrcData{mSrcSamples};
-        float *RESTRICT DstData{mDstSamples};
+        float *RESTRICT SrcData{mSrcSamples.data()};
+        float *RESTRICT DstData{mDstSamples.data()};
         uint DataPosFrac{mFracOffset};
         uint64_t DataSize64{prepcount};
         DataSize64 += readable;
@@ -271,13 +268,13 @@ uint SampleConverter::convert(const void **src, uint *srcframes, void *dst, uint
             /* Load the previous samples into the source data first, then the
              * new samples from the input buffer.
              */
-            std::copy_n(mChan[chan].PrevSamples, prepcount, SrcData);
+            std::copy_n(mChan[chan].PrevSamples.cbegin(), prepcount, SrcData);
             LoadSamples(SrcData + prepcount, SrcSamples, mChan.size(), mSrcType, readable);
 
             /* Store as many prep samples for next time as possible, given the
              * number of output samples being generated.
              */
-            std::copy_n(SrcData+SrcDataEnd, nextprep, mChan[chan].PrevSamples);
+            std::copy_n(SrcData+SrcDataEnd, nextprep, mChan[chan].PrevSamples.begin());
             std::fill(std::begin(mChan[chan].PrevSamples)+nextprep,
                 std::end(mChan[chan].PrevSamples), 0.0f);
 
@@ -328,9 +325,9 @@ uint SampleConverter::convertPlanar(const void **src, uint *srcframes, void *con
              */
             for(size_t chan{0u};chan < mChan.size();chan++)
             {
-                LoadSamples(&mChan[chan].PrevSamples[prepcount],
-                    static_cast<const std::byte*>(src[chan]), 1, mSrcType, readable);
-                src[chan] = static_cast<const std::byte*>(src[chan]) + mSrcTypeSize*readable;
+                auto *samples = static_cast<const std::byte*>(src[chan]);
+                LoadSamples(&mChan[chan].PrevSamples[prepcount], samples, 1, mSrcType, readable);
+                src[chan] = samples + size_t{mSrcTypeSize}*readable;
             }
 
             mSrcPrepCount = prepcount + readable;
@@ -338,8 +335,8 @@ uint SampleConverter::convertPlanar(const void **src, uint *srcframes, void *con
             break;
         }
 
-        float *RESTRICT SrcData{mSrcSamples};
-        float *RESTRICT DstData{mDstSamples};
+        float *RESTRICT SrcData{mSrcSamples.data()};
+        float *RESTRICT DstData{mDstSamples.data()};
         uint DataPosFrac{mFracOffset};
         uint64_t DataSize64{prepcount};
         DataSize64 += readable;
@@ -363,13 +360,13 @@ uint SampleConverter::convertPlanar(const void **src, uint *srcframes, void *con
             /* Load the previous samples into the source data first, then the
              * new samples from the input buffer.
              */
-            std::copy_n(mChan[chan].PrevSamples, prepcount, SrcData);
+            std::copy_n(mChan[chan].PrevSamples.cbegin(), prepcount, SrcData);
             LoadSamples(SrcData + prepcount, src[chan], 1, mSrcType, readable);
 
             /* Store as many prep samples for next time as possible, given the
              * number of output samples being generated.
              */
-            std::copy_n(SrcData+SrcDataEnd, nextprep, mChan[chan].PrevSamples);
+            std::copy_n(SrcData+SrcDataEnd, nextprep, mChan[chan].PrevSamples.begin());
             std::fill(std::begin(mChan[chan].PrevSamples)+nextprep,
                 std::end(mChan[chan].PrevSamples), 0.0f);
 
@@ -377,7 +374,7 @@ uint SampleConverter::convertPlanar(const void **src, uint *srcframes, void *con
             mResample(&mState, SrcData+MaxResamplerEdge, DataPosFrac, increment,
                 {DstData, DstSize});
 
-            std::byte *DstSamples = static_cast<std::byte*>(dst[chan]) + pos*mDstTypeSize;
+            auto *DstSamples = static_cast<std::byte*>(dst[chan]) + pos*size_t{mDstTypeSize};
             StoreSamples(DstSamples, DstData, 1, mDstType, DstSize);
         }
 
@@ -390,7 +387,7 @@ uint SampleConverter::convertPlanar(const void **src, uint *srcframes, void *con
         /* Update the src and dst pointers in case there's still more to do. */
         const uint srcread{minu(NumSrcSamples, SrcDataEnd + mSrcPrepCount - prepcount)};
         for(size_t chan{0u};chan < mChan.size();chan++)
-            src[chan] = static_cast<const std::byte*>(src[chan]) + mSrcTypeSize*srcread;
+            src[chan] = static_cast<const std::byte*>(src[chan]) + size_t{mSrcTypeSize}*srcread;
         NumSrcSamples -= srcread;
 
         pos += DstSize;

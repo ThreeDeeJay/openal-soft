@@ -35,11 +35,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <memory.h>
 #include <mutex>
-#include <stdlib.h>
-#include <stdio.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -191,8 +191,6 @@ struct DSoundPlayback final : public BackendBase {
 
     std::atomic<bool> mKillNow{true};
     std::thread mThread;
-
-    DEF_NEWDEL(DSoundPlayback)
 };
 
 DSoundPlayback::~DSoundPlayback()
@@ -560,8 +558,6 @@ struct DSoundCapture final : public BackendBase {
     DWORD mCursor{0u};
 
     RingBufferPtr mRing;
-
-    DEF_NEWDEL(DSoundCapture)
 };
 
 DSoundCapture::~DSoundCapture()
@@ -717,7 +713,7 @@ void DSoundCapture::stop()
 }
 
 void DSoundCapture::captureSamples(std::byte *buffer, uint samples)
-{ mRing->read(buffer, samples); }
+{ std::ignore = mRing->read(buffer, samples); }
 
 uint DSoundCapture::availableSamples()
 {
@@ -740,9 +736,9 @@ uint DSoundCapture::availableSamples()
     }
     if(SUCCEEDED(hr))
     {
-        mRing->write(ReadPtr1, ReadCnt1/FrameSize);
+        std::ignore = mRing->write(ReadPtr1, ReadCnt1/FrameSize);
         if(ReadPtr2 != nullptr && ReadCnt2 > 0)
-            mRing->write(ReadPtr2, ReadCnt2/FrameSize);
+            std::ignore = mRing->write(ReadPtr2, ReadCnt2/FrameSize);
         hr = mDSCbuffer->Unlock(ReadPtr1, ReadCnt1, ReadPtr2, ReadCnt2);
         mCursor = ReadCursor;
     }
@@ -778,7 +774,7 @@ bool DSoundBackendFactory::init()
         }
 
 #define LOAD_FUNC(f) do {                                                     \
-    p##f = al::bit_cast<decltype(p##f)>(GetSymbol(ds_handle, #f));            \
+    p##f = reinterpret_cast<decltype(p##f)>(GetSymbol(ds_handle, #f));        \
     if(!p##f)                                                                 \
     {                                                                         \
         CloseLib(ds_handle);                                                  \

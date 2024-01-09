@@ -146,12 +146,11 @@ void Resample_<LerpTag,NEONTag>(const InterpState*, const float *RESTRICT src, u
     const int32x4_t increment4 = vdupq_n_s32(static_cast<int>(increment*4));
     const float32x4_t fracOne4 = vdupq_n_f32(1.0f/MixerFracOne);
     const int32x4_t fracMask4 = vdupq_n_s32(MixerFracMask);
-    alignas(16) uint pos_[4], frac_[4];
-    int32x4_t pos4, frac4;
 
-    InitPosArrays(frac, increment, frac_, pos_);
-    frac4 = vld1q_s32(reinterpret_cast<int*>(frac_));
-    pos4 = vld1q_s32(reinterpret_cast<int*>(pos_));
+    alignas(16) std::array<uint,4> pos_, frac_;
+    InitPosArrays(frac, increment, al::span{frac_}, al::span{pos_});
+    int32x4_t frac4 = vld1q_s32(reinterpret_cast<int*>(frac_.data()));
+    int32x4_t pos4 = vld1q_s32(reinterpret_cast<int*>(pos_.data()));
 
     auto dst_iter = dst.begin();
     for(size_t todo{dst.size()>>2};todo;--todo)
@@ -197,7 +196,7 @@ void Resample_<CubicTag,NEONTag>(const InterpState *state, const float *RESTRICT
 {
     ASSUME(frac < MixerFracOne);
 
-    const CubicCoefficients *RESTRICT filter = al::assume_aligned<16>(state->cubic.filter);
+    const auto *RESTRICT filter = al::assume_aligned<16>(std::get<CubicState>(*state).filter);
 
     src -= 1;
     for(float &out_sample : dst)
@@ -209,8 +208,8 @@ void Resample_<CubicTag,NEONTag>(const InterpState *state, const float *RESTRICT
         /* Apply the phase interpolated filter. */
 
         /* f = fil + pf*phd */
-        const float32x4_t f4 = vmlaq_f32(vld1q_f32(filter[pi].mCoeffs), pf4,
-            vld1q_f32(filter[pi].mDeltas));
+        const float32x4_t f4 = vmlaq_f32(vld1q_f32(filter[pi].mCoeffs.data()), pf4,
+            vld1q_f32(filter[pi].mDeltas.data()));
         /* r = f*src */
         float32x4_t r4{vmulq_f32(f4, vld1q_f32(src))};
 
@@ -227,13 +226,14 @@ template<>
 void Resample_<BSincTag,NEONTag>(const InterpState *state, const float *RESTRICT src, uint frac,
     const uint increment, const al::span<float> dst)
 {
-    const float *const filter{state->bsinc.filter};
-    const float32x4_t sf4{vdupq_n_f32(state->bsinc.sf)};
-    const size_t m{state->bsinc.m};
+    const auto &bsinc = std::get<BsincState>(*state);
+    const float *const filter{bsinc.filter};
+    const float32x4_t sf4{vdupq_n_f32(bsinc.sf)};
+    const size_t m{bsinc.m};
     ASSUME(m > 0);
     ASSUME(frac < MixerFracOne);
 
-    src -= state->bsinc.l;
+    src -= bsinc.l;
     for(float &out_sample : dst)
     {
         // Calculate the phase index and factor.
@@ -244,9 +244,9 @@ void Resample_<BSincTag,NEONTag>(const InterpState *state, const float *RESTRICT
         float32x4_t r4{vdupq_n_f32(0.0f)};
         {
             const float32x4_t pf4{vdupq_n_f32(pf)};
-            const float *RESTRICT fil{filter + m*pi*2};
+            const float *RESTRICT fil{filter + m*pi*2_uz};
             const float *RESTRICT phd{fil + m};
-            const float *RESTRICT scd{fil + BSincPhaseCount*2*m};
+            const float *RESTRICT scd{fil + BSincPhaseCount*2_uz*m};
             const float *RESTRICT spd{scd + m};
             size_t td{m >> 2};
             size_t j{0u};
@@ -271,15 +271,16 @@ void Resample_<BSincTag,NEONTag>(const InterpState *state, const float *RESTRICT
 }
 
 template<>
-void Resample_<FastBSincTag,NEONTag>(const InterpState *state, const float *RESTRICT src, uint frac,
-    const uint increment, const al::span<float> dst)
+void Resample_<FastBSincTag,NEONTag>(const InterpState *state, const float *RESTRICT src,
+    uint frac, const uint increment, const al::span<float> dst)
 {
-    const float *const filter{state->bsinc.filter};
-    const size_t m{state->bsinc.m};
+    const auto &bsinc = std::get<BsincState>(*state);
+    const float *const filter{bsinc.filter};
+    const size_t m{bsinc.m};
     ASSUME(m > 0);
     ASSUME(frac < MixerFracOne);
 
-    src -= state->bsinc.l;
+    src -= bsinc.l;
     for(float &out_sample : dst)
     {
         // Calculate the phase index and factor.
@@ -290,7 +291,7 @@ void Resample_<FastBSincTag,NEONTag>(const InterpState *state, const float *REST
         float32x4_t r4{vdupq_n_f32(0.0f)};
         {
             const float32x4_t pf4{vdupq_n_f32(pf)};
-            const float *RESTRICT fil{filter + m*pi*2};
+            const float *RESTRICT fil{filter + m*pi*2_uz};
             const float *RESTRICT phd{fil + m};
             size_t td{m >> 2};
             size_t j{0u};

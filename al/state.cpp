@@ -60,6 +60,7 @@
 
 namespace {
 
+/* NOLINTBEGIN(*-avoid-c-arrays) */
 constexpr ALchar alVendor[] = "OpenAL Community";
 constexpr ALchar alVersion[] = "1.1 ALSOFT " ALSOFT_VERSION;
 constexpr ALchar alRenderer[] = "OpenAL Soft";
@@ -73,6 +74,7 @@ constexpr ALchar alErrInvalidOp[] = "Invalid Operation";
 constexpr ALchar alErrOutOfMemory[] = "Out of Memory";
 constexpr ALchar alStackOverflow[] = "Stack Overflow";
 constexpr ALchar alStackUnderflow[] = "Stack Underflow";
+/* NOLINTEND(*-avoid-c-arrays) */
 
 /* Resampler strings */
 template<Resampler rtype> struct ResamplerName { };
@@ -299,7 +301,7 @@ inline void UpdateProps(ALCcontext *context)
 /* WARNING: Non-standard export! Not part of any extension, or exposed in the
  * alcFunctions list.
  */
-AL_API const ALchar* AL_APIENTRY alsoft_get_version(void) noexcept
+AL_API auto AL_APIENTRY alsoft_get_version() noexcept -> const ALchar*
 {
     static const auto spoof = al::getenv("ALSOFT_SPOOF_VERSION");
     if(spoof) return spoof->c_str();
@@ -386,7 +388,7 @@ FORCE_ALIGN ALboolean AL_APIENTRY alIsEnabledDirect(ALCcontext *context, ALenum 
 }
 
 #define DECL_GETFUNC(R, Name, Ext)                                            \
-AL_API R AL_APIENTRY Name##Ext(ALenum pname) noexcept                         \
+AL_API auto AL_APIENTRY Name##Ext(ALenum pname) noexcept -> R                 \
 {                                                                             \
     R value{};                                                                \
     auto context = GetContextRef();                                           \
@@ -394,7 +396,7 @@ AL_API R AL_APIENTRY Name##Ext(ALenum pname) noexcept                         \
     Name##vDirect##Ext(GetContextRef().get(), pname, &value);                 \
     return value;                                                             \
 }                                                                             \
-FORCE_ALIGN R AL_APIENTRY Name##Direct##Ext(ALCcontext *context, ALenum pname) noexcept \
+FORCE_ALIGN auto AL_APIENTRY Name##Direct##Ext(ALCcontext *context, ALenum pname) noexcept -> R \
 {                                                                             \
     R value{};                                                                \
     Name##vDirect##Ext(context, pname, &value);                               \
@@ -461,7 +463,7 @@ FORCE_ALIGN void AL_APIENTRY alGetPointervDirectSOFT(ALCcontext *context, ALenum
     switch(pname)
     {
     case AL_EVENT_CALLBACK_FUNCTION_SOFT:
-        *values = al::bit_cast<void*>(context->mEventCb);
+        *values = reinterpret_cast<void*>(context->mEventCb);
         break;
 
     case AL_EVENT_CALLBACK_USER_PARAM_SOFT:
@@ -469,7 +471,7 @@ FORCE_ALIGN void AL_APIENTRY alGetPointervDirectSOFT(ALCcontext *context, ALenum
         break;
 
     case AL_DEBUG_CALLBACK_FUNCTION_EXT:
-        *values = al::bit_cast<void*>(context->mDebugCb);
+        *values = reinterpret_cast<void*>(context->mDebugCb);
         break;
 
     case AL_DEBUG_CALLBACK_USER_PARAM_EXT:
@@ -641,18 +643,18 @@ AL_API void AL_APIENTRY alDopplerVelocity(ALfloat value) noexcept
 
 void UpdateContextProps(ALCcontext *context)
 {
-    /* Get an unused proprty container, or allocate a new one as needed. */
+    /* Get an unused property container, or allocate a new one as needed. */
     ContextProps *props{context->mFreeContextProps.load(std::memory_order_acquire)};
     if(!props)
-        props = new ContextProps{};
-    else
     {
-        ContextProps *next;
-        do {
-            next = props->next.load(std::memory_order_relaxed);
-        } while(context->mFreeContextProps.compare_exchange_weak(props, next,
-                std::memory_order_seq_cst, std::memory_order_acquire) == 0);
+        context->allocContextProps();
+        props = context->mFreeContextProps.load(std::memory_order_acquire);
     }
+    ContextProps *next;
+    do {
+        next = props->next.load(std::memory_order_relaxed);
+    } while(context->mFreeContextProps.compare_exchange_weak(props, next,
+        std::memory_order_acq_rel, std::memory_order_acquire) == false);
 
     /* Copy in current property values. */
     ALlistener &listener = context->mListener;

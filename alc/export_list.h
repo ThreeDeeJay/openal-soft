@@ -16,7 +16,8 @@ struct FuncExport {
     const char *funcName;
     void *address;
 };
-#define DECL(x) { #x, reinterpret_cast<void*>(x) }
+#define DECL(x) FuncExport{#x, reinterpret_cast<void*>(x)}
+/* NOLINTNEXTLINE(*-avoid-c-arrays) Too large for std::array auto-deduction :( */
 inline const FuncExport alcFunctions[]{
     DECL(alcCreateContext),
     DECL(alcMakeContextCurrent),
@@ -56,6 +57,7 @@ inline const FuncExport alcFunctions[]{
 
     DECL(alcReopenDeviceSOFT),
 
+    DECL(alcEventIsSupportedSOFT),
     DECL(alcEventControlSOFT),
     DECL(alcEventCallbackSOFT),
 
@@ -375,8 +377,9 @@ inline const FuncExport alcFunctions[]{
 
     /* Extra functions */
     DECL(alsoft_set_log_callback),
+};
 #ifdef ALSOFT_EAX
-}, eaxFunctions[]{
+inline const std::array eaxFunctions{
     DECL(EAXGet),
     DECL(EAXSet),
     DECL(EAXGetBufferMode),
@@ -386,15 +389,16 @@ inline const FuncExport alcFunctions[]{
     DECL(EAXSetDirect),
     DECL(EAXGetBufferModeDirect),
     DECL(EAXSetBufferModeDirect),
-#endif
 };
+#endif
 #undef DECL
 
 struct EnumExport {
     const char *enumName;
     int value;
 };
-#define DECL(x) { #x, (x) }
+#define DECL(x) EnumExport{#x, (x)}
+/* NOLINTNEXTLINE(*-avoid-c-arrays) Too large for std::array auto-deduction :( */
 inline const EnumExport alcEnumerations[]{
     DECL(ALC_INVALID),
     DECL(ALC_FALSE),
@@ -597,6 +601,46 @@ inline const EnumExport alcEnumerations[]{
     DECL(AL_FORMAT_BFORMAT3D_16),
     DECL(AL_FORMAT_BFORMAT3D_FLOAT32),
     DECL(AL_FORMAT_BFORMAT3D_MULAW),
+
+    DECL(AL_FORMAT_UHJ2CHN8_SOFT),
+    DECL(AL_FORMAT_UHJ2CHN16_SOFT),
+    DECL(AL_FORMAT_UHJ2CHN_FLOAT32_SOFT),
+    DECL(AL_FORMAT_UHJ3CHN8_SOFT),
+    DECL(AL_FORMAT_UHJ3CHN16_SOFT),
+    DECL(AL_FORMAT_UHJ3CHN_FLOAT32_SOFT),
+    DECL(AL_FORMAT_UHJ4CHN8_SOFT),
+    DECL(AL_FORMAT_UHJ4CHN16_SOFT),
+    DECL(AL_FORMAT_UHJ4CHN_FLOAT32_SOFT),
+    DECL(AL_STEREO_MODE_SOFT),
+    DECL(AL_NORMAL_SOFT),
+    DECL(AL_SUPER_STEREO_SOFT),
+    DECL(AL_SUPER_STEREO_WIDTH_SOFT),
+
+    DECL(AL_FORMAT_UHJ2CHN_MULAW_SOFT),
+    DECL(AL_FORMAT_UHJ2CHN_ALAW_SOFT),
+    DECL(AL_FORMAT_UHJ2CHN_IMA4_SOFT),
+    DECL(AL_FORMAT_UHJ2CHN_MSADPCM_SOFT),
+    DECL(AL_FORMAT_UHJ3CHN_MULAW_SOFT),
+    DECL(AL_FORMAT_UHJ3CHN_ALAW_SOFT),
+    DECL(AL_FORMAT_UHJ4CHN_MULAW_SOFT),
+    DECL(AL_FORMAT_UHJ4CHN_ALAW_SOFT),
+
+    DECL(AL_FORMAT_MONO_I32),
+    DECL(AL_FORMAT_STEREO_I32),
+    DECL(AL_FORMAT_REAR_I32),
+    DECL(AL_FORMAT_QUAD_I32),
+    DECL(AL_FORMAT_51CHN_I32),
+    DECL(AL_FORMAT_61CHN_I32),
+    DECL(AL_FORMAT_71CHN_I32),
+    DECL(AL_FORMAT_UHJ2CHN_I32),
+    DECL(AL_FORMAT_UHJ3CHN_I32),
+    DECL(AL_FORMAT_UHJ4CHN_I32),
+
+    DECL(AL_FORMAT_REAR_FLOAT32),
+    DECL(AL_FORMAT_QUAD_FLOAT32),
+    DECL(AL_FORMAT_51CHN_FLOAT32),
+    DECL(AL_FORMAT_61CHN_FLOAT32),
+    DECL(AL_FORMAT_71CHN_FLOAT32),
 
     DECL(AL_FREQUENCY),
     DECL(AL_BITS),
@@ -823,29 +867,6 @@ inline const EnumExport alcEnumerations[]{
     DECL(AL_EFFECT_CONVOLUTION_SOFT),
     DECL(AL_EFFECTSLOT_STATE_SOFT),
 
-    DECL(AL_FORMAT_UHJ2CHN8_SOFT),
-    DECL(AL_FORMAT_UHJ2CHN16_SOFT),
-    DECL(AL_FORMAT_UHJ2CHN_FLOAT32_SOFT),
-    DECL(AL_FORMAT_UHJ3CHN8_SOFT),
-    DECL(AL_FORMAT_UHJ3CHN16_SOFT),
-    DECL(AL_FORMAT_UHJ3CHN_FLOAT32_SOFT),
-    DECL(AL_FORMAT_UHJ4CHN8_SOFT),
-    DECL(AL_FORMAT_UHJ4CHN16_SOFT),
-    DECL(AL_FORMAT_UHJ4CHN_FLOAT32_SOFT),
-    DECL(AL_STEREO_MODE_SOFT),
-    DECL(AL_NORMAL_SOFT),
-    DECL(AL_SUPER_STEREO_SOFT),
-    DECL(AL_SUPER_STEREO_WIDTH_SOFT),
-
-    DECL(AL_FORMAT_UHJ2CHN_MULAW_SOFT),
-    DECL(AL_FORMAT_UHJ2CHN_ALAW_SOFT),
-    DECL(AL_FORMAT_UHJ2CHN_IMA4_SOFT),
-    DECL(AL_FORMAT_UHJ2CHN_MSADPCM_SOFT),
-    DECL(AL_FORMAT_UHJ3CHN_MULAW_SOFT),
-    DECL(AL_FORMAT_UHJ3CHN_ALAW_SOFT),
-    DECL(AL_FORMAT_UHJ4CHN_MULAW_SOFT),
-    DECL(AL_FORMAT_UHJ4CHN_ALAW_SOFT),
-
     DECL(AL_DONT_CARE_EXT),
     DECL(AL_DEBUG_OUTPUT_EXT),
     DECL(AL_DEBUG_CALLBACK_FUNCTION_EXT),
@@ -883,15 +904,16 @@ inline const EnumExport alcEnumerations[]{
     DECL(AL_AUXILIARY_EFFECT_SLOT_EXT),
 
     DECL(AL_STOP_SOURCES_ON_DISCONNECT_SOFT),
+};
 #ifdef ALSOFT_EAX
-}, eaxEnumerations[]{
+inline const std::array eaxEnumerations{
     DECL(AL_EAX_RAM_SIZE),
     DECL(AL_EAX_RAM_FREE),
     DECL(AL_STORAGE_AUTOMATIC),
     DECL(AL_STORAGE_HARDWARE),
     DECL(AL_STORAGE_ACCESSIBLE),
-#endif // ALSOFT_EAX
 };
+#endif // ALSOFT_EAX
 #undef DECL
 
 #endif /* ALC_EXPORT_LIST_H */

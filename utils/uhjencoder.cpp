@@ -26,14 +26,13 @@
 
 #include <array>
 #include <cinttypes>
+#include <cstddef>
 #include <cstring>
 #include <memory>
-#include <stddef.h>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "almalloc.h"
 #include "alnumbers.h"
 #include "alspan.h"
 #include "opthelpers.h"
@@ -82,8 +81,6 @@ struct UhjEncoder {
 
     void encode(const al::span<FloatBufferLine> OutSamples,
         const al::span<FloatBufferLine,4> InSamples, const size_t SamplesToDo);
-
-    DEF_NEWDEL(UhjEncoder)
 };
 
 const PhaseShifterT<UhjEncoder::sFilterDelay*2> PShift{};
@@ -179,50 +176,55 @@ struct SpeakerPos {
 };
 
 /* Azimuth is counter-clockwise. */
-constexpr SpeakerPos StereoMap[2]{
-    { SF_CHANNEL_MAP_LEFT,   30.0f, 0.0f },
-    { SF_CHANNEL_MAP_RIGHT, -30.0f, 0.0f },
-}, QuadMap[4]{
-    { SF_CHANNEL_MAP_LEFT,         45.0f, 0.0f },
-    { SF_CHANNEL_MAP_RIGHT,       -45.0f, 0.0f },
-    { SF_CHANNEL_MAP_REAR_LEFT,   135.0f, 0.0f },
-    { SF_CHANNEL_MAP_REAR_RIGHT, -135.0f, 0.0f },
-}, X51Map[6]{
-    { SF_CHANNEL_MAP_LEFT,         30.0f, 0.0f },
-    { SF_CHANNEL_MAP_RIGHT,       -30.0f, 0.0f },
-    { SF_CHANNEL_MAP_CENTER,        0.0f, 0.0f },
-    { SF_CHANNEL_MAP_LFE, 0.0f, 0.0f },
-    { SF_CHANNEL_MAP_SIDE_LEFT,   110.0f, 0.0f },
-    { SF_CHANNEL_MAP_SIDE_RIGHT, -110.0f, 0.0f },
-}, X51RearMap[6]{
-    { SF_CHANNEL_MAP_LEFT,         30.0f, 0.0f },
-    { SF_CHANNEL_MAP_RIGHT,       -30.0f, 0.0f },
-    { SF_CHANNEL_MAP_CENTER,        0.0f, 0.0f },
-    { SF_CHANNEL_MAP_LFE, 0.0f, 0.0f },
-    { SF_CHANNEL_MAP_REAR_LEFT,   110.0f, 0.0f },
-    { SF_CHANNEL_MAP_REAR_RIGHT, -110.0f, 0.0f },
-}, X71Map[8]{
-    { SF_CHANNEL_MAP_LEFT,         30.0f, 0.0f },
-    { SF_CHANNEL_MAP_RIGHT,       -30.0f, 0.0f },
-    { SF_CHANNEL_MAP_CENTER,        0.0f, 0.0f },
-    { SF_CHANNEL_MAP_LFE, 0.0f, 0.0f },
-    { SF_CHANNEL_MAP_REAR_LEFT,   150.0f, 0.0f },
-    { SF_CHANNEL_MAP_REAR_RIGHT, -150.0f, 0.0f },
-    { SF_CHANNEL_MAP_SIDE_LEFT,    90.0f, 0.0f },
-    { SF_CHANNEL_MAP_SIDE_RIGHT,  -90.0f, 0.0f },
-}, X714Map[12]{
-    { SF_CHANNEL_MAP_LEFT,         30.0f,  0.0f },
-    { SF_CHANNEL_MAP_RIGHT,       -30.0f,  0.0f },
-    { SF_CHANNEL_MAP_CENTER,        0.0f,  0.0f },
-    { SF_CHANNEL_MAP_LFE, 0.0f, 0.0f },
-    { SF_CHANNEL_MAP_REAR_LEFT,   150.0f,  0.0f },
-    { SF_CHANNEL_MAP_REAR_RIGHT, -150.0f,  0.0f },
-    { SF_CHANNEL_MAP_SIDE_LEFT,    90.0f,  0.0f },
-    { SF_CHANNEL_MAP_SIDE_RIGHT,  -90.0f,  0.0f },
-    { SF_CHANNEL_MAP_TOP_FRONT_LEFT,    45.0f, 35.0f },
-    { SF_CHANNEL_MAP_TOP_FRONT_RIGHT,  -45.0f, 35.0f },
-    { SF_CHANNEL_MAP_TOP_REAR_LEFT,    135.0f, 35.0f },
-    { SF_CHANNEL_MAP_TOP_REAR_RIGHT,  -135.0f, 35.0f },
+constexpr std::array StereoMap{
+    SpeakerPos{SF_CHANNEL_MAP_LEFT,   30.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_RIGHT, -30.0f, 0.0f},
+};
+constexpr std::array QuadMap{
+    SpeakerPos{SF_CHANNEL_MAP_LEFT,         45.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_RIGHT,       -45.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_REAR_LEFT,   135.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_REAR_RIGHT, -135.0f, 0.0f},
+};
+constexpr std::array X51Map{
+    SpeakerPos{SF_CHANNEL_MAP_LEFT,         30.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_RIGHT,       -30.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_CENTER,        0.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_LFE, 0.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_SIDE_LEFT,   110.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_SIDE_RIGHT, -110.0f, 0.0f},
+};
+constexpr std::array X51RearMap{
+    SpeakerPos{SF_CHANNEL_MAP_LEFT,         30.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_RIGHT,       -30.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_CENTER,        0.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_LFE, 0.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_REAR_LEFT,   110.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_REAR_RIGHT, -110.0f, 0.0f},
+};
+constexpr std::array X71Map{
+    SpeakerPos{SF_CHANNEL_MAP_LEFT,         30.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_RIGHT,       -30.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_CENTER,        0.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_LFE, 0.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_REAR_LEFT,   150.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_REAR_RIGHT, -150.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_SIDE_LEFT,    90.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_SIDE_RIGHT,  -90.0f, 0.0f},
+};
+constexpr std::array X714Map{
+    SpeakerPos{SF_CHANNEL_MAP_LEFT,         30.0f,  0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_RIGHT,       -30.0f,  0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_CENTER,        0.0f,  0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_LFE, 0.0f, 0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_REAR_LEFT,   150.0f,  0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_REAR_RIGHT, -150.0f,  0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_SIDE_LEFT,    90.0f,  0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_SIDE_RIGHT,  -90.0f,  0.0f},
+    SpeakerPos{SF_CHANNEL_MAP_TOP_FRONT_LEFT,    45.0f, 35.0f},
+    SpeakerPos{SF_CHANNEL_MAP_TOP_FRONT_RIGHT,  -45.0f, 35.0f},
+    SpeakerPos{SF_CHANNEL_MAP_TOP_REAR_LEFT,    135.0f, 35.0f},
+    SpeakerPos{SF_CHANNEL_MAP_TOP_REAR_RIGHT,  -135.0f, 35.0f},
 };
 
 constexpr auto GenCoeffs(double x /*+front*/, double y /*+left*/, double z /*+up*/) noexcept
@@ -325,7 +327,7 @@ int main(int argc, char **argv)
                     return false;
                 for(const int id : a)
                 {
-                    if(std::find(b.begin(), b.end(), id) != b.end())
+                    if(std::find(b.begin(), b.end(), id) == b.end())
                         return false;
                 }
                 return true;
@@ -413,11 +415,11 @@ int main(int argc, char **argv)
         }
 
         auto encoder = std::make_unique<UhjEncoder>();
-        auto splbuf = al::vector<FloatBufferLine, 16>(static_cast<uint>(9+ininfo.channels)+uhjchans);
-        auto ambmem = al::span<FloatBufferLine,4>{splbuf.data(), 4};
-        auto encmem = al::span<FloatBufferLine,4>{&splbuf[4], 4};
-        auto srcmem = al::span<float,BufferLineSize>{splbuf[8].data(), BufferLineSize};
-        auto outmem = al::span<float>{splbuf[9].data(), BufferLineSize*uhjchans};
+        auto splbuf = al::vector<FloatBufferLine, 16>(static_cast<uint>(ininfo.channels)+9+size_t{uhjchans});
+        auto ambmem = al::span{splbuf}.subspan<0,4>();
+        auto encmem = al::span{splbuf}.subspan<4,4>();
+        auto srcmem = al::span{splbuf[8]};
+        auto outmem = al::span<float>{splbuf[9].data(), size_t{BufferLineSize}*uhjchans};
 
         /* A number of initial samples need to be skipped to cut the lead-in
          * from the all-pass filter delay. The same number of samples need to

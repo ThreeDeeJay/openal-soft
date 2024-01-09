@@ -285,7 +285,7 @@ struct AudioState {
     AVStream *mStream{nullptr};
     AVCodecCtxPtr mCodecCtx;
 
-    DataQueue<2*1024*1024> mQueue;
+    DataQueue<size_t{2}*1024*1024> mQueue;
 
     /* Used for clock difference average computation */
     seconds_d64 mClockDiffAvg{0};
@@ -310,8 +310,9 @@ struct AudioState {
     int mSamplesPos{0};
     int mSamplesMax{0};
 
-    std::unique_ptr<uint8_t[]> mBufferData;
-    size_t mBufferDataSize{0};
+    std::vector<uint8_t> mBufferData_;
+    //std::unique_ptr<uint8_t[]> mBufferData;
+    //size_t mBufferDataSize{0};
     std::atomic<size_t> mReadPos{0};
     std::atomic<size_t> mWritePos{0};
 
@@ -321,7 +322,7 @@ struct AudioState {
 
     std::mutex mSrcMutex;
     std::condition_variable mSrcCond;
-    std::atomic_flag mConnected;
+    std::atomic_flag mConnected{};
     ALuint mSource{0};
     std::array<ALuint,AudioBufferCount> mBuffers{};
     ALuint mBufferIdx{0};
@@ -371,7 +372,7 @@ struct VideoState {
     AVStream *mStream{nullptr};
     AVCodecCtxPtr mCodecCtx;
 
-    DataQueue<14*1024*1024> mQueue;
+    DataQueue<size_t{14}*1024*1024> mQueue;
 
     /* The pts of the currently displayed frame, and the time (av_gettime) it
      * was last updated - used to have running video pts
@@ -474,8 +475,8 @@ nanoseconds AudioState::getClockNoLock()
 
         // Get the current device clock time and latency.
         auto device = alcGetContextsDevice(alcGetCurrentContext());
-        ALCint64SOFT devtimes[2]{0,0};
-        alcGetInteger64vSOFT(device, ALC_DEVICE_CLOCK_LATENCY_SOFT, 2, devtimes);
+        std::array<ALCint64SOFT,2> devtimes{};
+        alcGetInteger64vSOFT(device, ALC_DEVICE_CLOCK_LATENCY_SOFT, 2, devtimes.data());
         auto latency = nanoseconds{devtimes[1]};
         auto device_time = nanoseconds{devtimes[0]};
 
@@ -485,7 +486,7 @@ nanoseconds AudioState::getClockNoLock()
         return device_time - mDeviceStartTime - latency;
     }
 
-    if(mBufferDataSize > 0)
+    if(!mBufferData_.empty())
     {
         if(mDeviceStartTime == nanoseconds::min())
             return nanoseconds::zero();
@@ -494,15 +495,14 @@ nanoseconds AudioState::getClockNoLock()
          * actually the timestamp of the first sample frame played. The audio
          * clock, then, is that plus the current source offset.
          */
-        ALint64SOFT offset[2];
+        std::array<ALint64SOFT,2> offset{};
         if(alGetSourcei64vSOFT)
-            alGetSourcei64vSOFT(mSource, AL_SAMPLE_OFFSET_LATENCY_SOFT, offset);
+            alGetSourcei64vSOFT(mSource, AL_SAMPLE_OFFSET_LATENCY_SOFT, offset.data());
         else
         {
             ALint ioffset;
             alGetSourcei(mSource, AL_SAMPLE_OFFSET, &ioffset);
             offset[0] = ALint64SOFT{ioffset} << 32;
-            offset[1] = 0;
         }
         /* NOTE: The source state must be checked last, in case an underrun
          * occurs and the source stops between getting the state and retrieving
@@ -523,7 +523,7 @@ nanoseconds AudioState::getClockNoLock()
              */
             const size_t woffset{mWritePos.load(std::memory_order_acquire)};
             const size_t roffset{mReadPos.load(std::memory_order_relaxed)};
-            const size_t readable{((woffset >= roffset) ? woffset : (mBufferDataSize+woffset)) -
+            const size_t readable{((woffset>=roffset) ? woffset : (mBufferData_.size()+woffset)) -
                 roffset};
 
             pts = mCurrentPts - nanoseconds{seconds{readable/mFrameSize}}/mCodecCtx->sample_rate;
@@ -550,15 +550,14 @@ nanoseconds AudioState::getClockNoLock()
     nanoseconds pts{mCurrentPts};
     if(mSource)
     {
-        ALint64SOFT offset[2];
+        std::array<ALint64SOFT,2> offset{};
         if(alGetSourcei64vSOFT)
-            alGetSourcei64vSOFT(mSource, AL_SAMPLE_OFFSET_LATENCY_SOFT, offset);
+            alGetSourcei64vSOFT(mSource, AL_SAMPLE_OFFSET_LATENCY_SOFT, offset.data());
         else
         {
             ALint ioffset;
             alGetSourcei(mSource, AL_SAMPLE_OFFSET, &ioffset);
             offset[0] = ALint64SOFT{ioffset} << 32;
-            offset[1] = 0;
         }
         ALint queued, status;
         alGetSourcei(mSource, AL_BUFFERS_QUEUED, &queued);
@@ -586,10 +585,10 @@ bool AudioState::startPlayback()
 {
     const size_t woffset{mWritePos.load(std::memory_order_acquire)};
     const size_t roffset{mReadPos.load(std::memory_order_relaxed)};
-    const size_t readable{((woffset >= roffset) ? woffset : (mBufferDataSize+woffset)) -
+    const size_t readable{((woffset >= roffset) ? woffset : (mBufferData_.size()+woffset)) -
         roffset};
 
-    if(mBufferDataSize > 0)
+    if(!mBufferData_.empty())
     {
         if(readable == 0)
             return false;
@@ -610,8 +609,8 @@ bool AudioState::startPlayback()
         /* Subtract the total buffer queue time from the current pts to get the
          * pts of the start of the queue.
          */
-        int64_t srctimes[2]{0,0};
-        alGetSourcei64vSOFT(mSource, AL_SAMPLE_OFFSET_CLOCK_SOFT, srctimes);
+        std::array<int64_t,2> srctimes{};
+        alGetSourcei64vSOFT(mSource, AL_SAMPLE_OFFSET_CLOCK_SOFT, srctimes.data());
         auto device_time = nanoseconds{srctimes[1]};
         auto src_offset = duration_cast<nanoseconds>(fixed32{srctimes[0]}) /
             mCodecCtx->sample_rate;
@@ -622,7 +621,7 @@ bool AudioState::startPlayback()
          * the device time the stream would have started at to reach where it
          * is now.
          */
-        if(mBufferDataSize > 0)
+        if(!mBufferData_.empty())
         {
             nanoseconds startpts{mCurrentPts -
                 nanoseconds{seconds{readable/mFrameSize}}/mCodecCtx->sample_rate};
@@ -685,9 +684,13 @@ int AudioState::decodeFrame()
             mDecodedFrame->nb_samples, mDstSampleFmt, 0);
         mSamplesMax = mDecodedFrame->nb_samples;
     }
+    /* Copy to a local to mark const. Don't know why this can't be implicit. */
+    using data_t = decltype(decltype(mDecodedFrame)::element_type::data);
+    std::array<const uint8_t*,std::extent_v<data_t>> cdata{};
+    std::copy(std::begin(mDecodedFrame->data), std::end(mDecodedFrame->data), cdata.begin());
     /* Return the amount of sample frames converted */
-    int data_size{swr_convert(mSwresCtx.get(), &mSamples, mDecodedFrame->nb_samples,
-        const_cast<const uint8_t**>(mDecodedFrame->data), mDecodedFrame->nb_samples)};
+    const int data_size{swr_convert(mSwresCtx.get(), &mSamples, mDecodedFrame->nb_samples,
+        cdata.data(), mDecodedFrame->nb_samples)};
 
     av_frame_unref(mDecodedFrame.get());
     return data_size;
@@ -739,8 +742,8 @@ bool AudioState::readAudio(uint8_t *samples, unsigned int length, int &sample_sk
         {
             const auto len = static_cast<unsigned int>(mSamplesLen - mSamplesPos);
             if(rem > len) rem = len;
-            std::copy_n(mSamples + static_cast<unsigned int>(mSamplesPos)*mFrameSize,
-                rem*mFrameSize, samples);
+            std::copy_n(mSamples + static_cast<unsigned int>(mSamplesPos)*size_t{mFrameSize},
+                rem*size_t{mFrameSize}, samples);
         }
         else
         {
@@ -750,9 +753,9 @@ bool AudioState::readAudio(uint8_t *samples, unsigned int length, int &sample_sk
             sample_dup(samples, mSamples, rem, mFrameSize);
         }
 
-        mSamplesPos += rem;
+        mSamplesPos += static_cast<int>(rem);
         mCurrentPts += nanoseconds{seconds{rem}} / mCodecCtx->sample_rate;
-        samples += rem*mFrameSize;
+        samples += rem*size_t{mFrameSize};
         audio_size += rem;
 
         while(mSamplesPos >= mSamplesLen)
@@ -791,17 +794,17 @@ bool AudioState::readAudio(int sample_skip)
     while(mSamplesLen > 0)
     {
         const size_t nsamples{((roffset > woffset) ? roffset-woffset-1
-            : (roffset == 0) ? (mBufferDataSize-woffset-1)
-            : (mBufferDataSize-woffset)) / mFrameSize};
+            : (roffset == 0) ? (mBufferData_.size()-woffset-1)
+            : (mBufferData_.size()-woffset)) / mFrameSize};
         if(!nsamples) break;
 
         if(mSamplesPos < 0)
         {
             const size_t rem{std::min<size_t>(nsamples, static_cast<ALuint>(-mSamplesPos))};
 
-            sample_dup(&mBufferData[woffset], mSamples, rem, mFrameSize);
+            sample_dup(&mBufferData_[woffset], mSamples, rem, mFrameSize);
             woffset += rem * mFrameSize;
-            if(woffset == mBufferDataSize) woffset = 0;
+            if(woffset == mBufferData_.size()) woffset = 0;
             mWritePos.store(woffset, std::memory_order_release);
 
             mCurrentPts += nanoseconds{seconds{rem}} / mCodecCtx->sample_rate;
@@ -813,9 +816,9 @@ bool AudioState::readAudio(int sample_skip)
         const size_t boffset{static_cast<ALuint>(mSamplesPos) * size_t{mFrameSize}};
         const size_t nbytes{rem * mFrameSize};
 
-        memcpy(&mBufferData[woffset], mSamples + boffset, nbytes);
+        memcpy(&mBufferData_[woffset], mSamples + boffset, nbytes);
         woffset += nbytes;
-        if(woffset == mBufferDataSize) woffset = 0;
+        if(woffset == mBufferData_.size()) woffset = 0;
         mWritePos.store(woffset, std::memory_order_release);
 
         mCurrentPts += nanoseconds{seconds{rem}} / mCodecCtx->sample_rate;
@@ -888,15 +891,15 @@ ALsizei AudioState::bufferCallback(void *data, ALsizei size) noexcept
         const size_t woffset{mWritePos.load(std::memory_order_relaxed)};
         if(woffset == roffset) break;
 
-        size_t todo{((woffset < roffset) ? mBufferDataSize : woffset) - roffset};
+        size_t todo{((woffset < roffset) ? mBufferData_.size() : woffset) - roffset};
         todo = std::min<size_t>(todo, static_cast<ALuint>(size-got));
 
-        memcpy(data, &mBufferData[roffset], todo);
+        memcpy(data, &mBufferData_[roffset], todo);
         data = static_cast<ALbyte*>(data) + todo;
         got += static_cast<ALsizei>(todo);
 
         roffset += todo;
-        if(roffset == mBufferDataSize)
+        if(roffset == mBufferData_.size())
             roffset = 0;
     }
     mReadPos.store(roffset, std::memory_order_release);
@@ -936,10 +939,11 @@ int AudioState::handler()
     };
     EventControlManager event_controller{sleep_time};
 
-    std::unique_ptr<uint8_t[]> samples;
+    std::vector<uint8_t> samples;
     ALsizei buffer_len{0};
 
     /* Find a suitable format for OpenAL. */
+    const auto layoutmask = mCodecCtx->ch_layout.u.mask; /* NOLINT(*-union-access) */
     mDstChanLayout = 0;
     mFormat = AL_NONE;
     if((mCodecCtx->sample_fmt == AV_SAMPLE_FMT_FLT || mCodecCtx->sample_fmt == AV_SAMPLE_FMT_FLTP
@@ -957,29 +961,28 @@ int AudioState::handler()
         {
             if(alIsExtensionPresent("AL_EXT_MCFORMATS"))
             {
-                if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_7POINT1)
+                if(layoutmask == AV_CH_LAYOUT_7POINT1)
                 {
-                    mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                    mDstChanLayout = layoutmask;
                     mFrameSize *= 8;
                     mFormat = alGetEnumValue("AL_FORMAT_71CHN32");
                 }
-                if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_5POINT1
-                    || mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_5POINT1_BACK)
+                if(layoutmask == AV_CH_LAYOUT_5POINT1 || layoutmask == AV_CH_LAYOUT_5POINT1_BACK)
                 {
-                    mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                    mDstChanLayout = layoutmask;
                     mFrameSize *= 6;
                     mFormat = alGetEnumValue("AL_FORMAT_51CHN32");
                 }
-                if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_QUAD)
+                if(layoutmask == AV_CH_LAYOUT_QUAD)
                 {
-                    mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                    mDstChanLayout = layoutmask;
                     mFrameSize *= 4;
                     mFormat = alGetEnumValue("AL_FORMAT_QUAD32");
                 }
             }
-            if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_MONO)
+            if(layoutmask == AV_CH_LAYOUT_MONO)
             {
-                mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                mDstChanLayout = layoutmask;
                 mFrameSize *= 1;
                 mFormat = AL_FORMAT_MONO_FLOAT32;
             }
@@ -1019,29 +1022,28 @@ int AudioState::handler()
         {
             if(alIsExtensionPresent("AL_EXT_MCFORMATS"))
             {
-                if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_7POINT1)
+                if(layoutmask == AV_CH_LAYOUT_7POINT1)
                 {
-                    mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                    mDstChanLayout = layoutmask;
                     mFrameSize *= 8;
                     mFormat = alGetEnumValue("AL_FORMAT_71CHN8");
                 }
-                if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_5POINT1
-                    || mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_5POINT1_BACK)
+                if(layoutmask == AV_CH_LAYOUT_5POINT1 || layoutmask == AV_CH_LAYOUT_5POINT1_BACK)
                 {
-                    mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                    mDstChanLayout = layoutmask;
                     mFrameSize *= 6;
                     mFormat = alGetEnumValue("AL_FORMAT_51CHN8");
                 }
-                if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_QUAD)
+                if(layoutmask == AV_CH_LAYOUT_QUAD)
                 {
-                    mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                    mDstChanLayout = layoutmask;
                     mFrameSize *= 4;
                     mFormat = alGetEnumValue("AL_FORMAT_QUAD8");
                 }
             }
-            if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_MONO)
+            if(layoutmask == AV_CH_LAYOUT_MONO)
             {
-                mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                mDstChanLayout = layoutmask;
                 mFrameSize *= 1;
                 mFormat = AL_FORMAT_MONO8;
             }
@@ -1073,29 +1075,28 @@ int AudioState::handler()
         {
             if(alIsExtensionPresent("AL_EXT_MCFORMATS"))
             {
-                if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_7POINT1)
+                if(layoutmask == AV_CH_LAYOUT_7POINT1)
                 {
-                    mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                    mDstChanLayout = layoutmask;
                     mFrameSize *= 8;
                     mFormat = alGetEnumValue("AL_FORMAT_71CHN16");
                 }
-                if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_5POINT1
-                    || mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_5POINT1_BACK)
+                if(layoutmask == AV_CH_LAYOUT_5POINT1 || layoutmask == AV_CH_LAYOUT_5POINT1_BACK)
                 {
-                    mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                    mDstChanLayout = layoutmask;
                     mFrameSize *= 6;
                     mFormat = alGetEnumValue("AL_FORMAT_51CHN16");
                 }
-                if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_QUAD)
+                if(layoutmask == AV_CH_LAYOUT_QUAD)
                 {
-                    mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                    mDstChanLayout = layoutmask;
                     mFrameSize *= 4;
                     mFormat = alGetEnumValue("AL_FORMAT_QUAD16");
                 }
             }
-            if(mCodecCtx->ch_layout.u.mask == AV_CH_LAYOUT_MONO)
+            if(layoutmask == AV_CH_LAYOUT_MONO)
             {
-                mDstChanLayout = mCodecCtx->ch_layout.u.mask;
+                mDstChanLayout = layoutmask;
                 mFrameSize *= 1;
                 mFormat = AL_FORMAT_MONO16;
             }
@@ -1151,9 +1152,9 @@ int AudioState::handler()
         mSwresCtx.reset(ps);
         if(err != 0)
         {
-            char errstr[AV_ERROR_MAX_STRING_SIZE]{};
+            std::array<char,AV_ERROR_MAX_STRING_SIZE> errstr{};
             std::cerr<< "Failed to allocate SwrContext: "
-                <<av_make_error_string(errstr, AV_ERROR_MAX_STRING_SIZE, err) <<std::endl;
+                <<av_make_error_string(errstr.data(), AV_ERROR_MAX_STRING_SIZE, err) <<std::endl;
             return 0;
         }
 
@@ -1166,7 +1167,7 @@ int AudioState::handler()
              * ordering and normalization, so a custom matrix is needed to
              * scale and reorder the source from AmbiX.
              */
-            std::vector<double> mtx(64*64, 0.0);
+            std::vector<double> mtx(size_t{64}*64, 0.0);
             mtx[0 + 0*64] = std::sqrt(0.5);
             mtx[3 + 1*64] = 1.0;
             mtx[1 + 2*64] = 1.0;
@@ -1185,17 +1186,17 @@ int AudioState::handler()
         mSwresCtx.reset(ps);
         if(err != 0)
         {
-            char errstr[AV_ERROR_MAX_STRING_SIZE]{};
+            std::array<char,AV_ERROR_MAX_STRING_SIZE> errstr{};
             std::cerr<< "Failed to allocate SwrContext: "
-                <<av_make_error_string(errstr, AV_ERROR_MAX_STRING_SIZE, err) <<std::endl;
+                <<av_make_error_string(errstr.data(), AV_ERROR_MAX_STRING_SIZE, err) <<std::endl;
             return 0;
         }
     }
     if(int err{swr_init(mSwresCtx.get())})
     {
-        char errstr[AV_ERROR_MAX_STRING_SIZE]{};
+        std::array<char,AV_ERROR_MAX_STRING_SIZE> errstr{};
         std::cerr<< "Failed to initialize audio converter: "
-            <<av_make_error_string(errstr, AV_ERROR_MAX_STRING_SIZE, err) <<std::endl;
+            <<av_make_error_string(errstr.data(), AV_ERROR_MAX_STRING_SIZE, err) <<std::endl;
         return 0;
     }
 
@@ -1206,8 +1207,8 @@ int AudioState::handler()
         alSourcei(mSource, AL_DIRECT_CHANNELS_SOFT, DirectOutMode);
     if(EnableWideStereo)
     {
-        const float angles[2]{static_cast<float>(M_PI / 3.0), static_cast<float>(-M_PI / 3.0)};
-        alSourcefv(mSource, AL_STEREO_ANGLES, angles);
+        const std::array angles{static_cast<float>(M_PI / 3.0), static_cast<float>(-M_PI / 3.0)};
+        alSourcefv(mSource, AL_STEREO_ANGLES, angles.data());
     }
     if(has_bfmt_ex)
     {
@@ -1237,13 +1238,12 @@ int AudioState::handler()
         }
         else
         {
-            mBufferDataSize = static_cast<size_t>(duration_cast<seconds>(mCodecCtx->sample_rate *
-                AudioBufferTotalTime).count()) * mFrameSize;
-            mBufferData = std::make_unique<uint8_t[]>(mBufferDataSize);
-            std::fill_n(mBufferData.get(), mBufferDataSize, uint8_t{});
+            mBufferData_.resize(static_cast<size_t>(duration_cast<seconds>(mCodecCtx->sample_rate *
+                AudioBufferTotalTime).count()) * mFrameSize);
+            std::fill(mBufferData_.begin(), mBufferData_.end(), uint8_t{});
 
             mReadPos.store(0, std::memory_order_relaxed);
-            mWritePos.store(mBufferDataSize/mFrameSize/2*mFrameSize, std::memory_order_relaxed);
+            mWritePos.store(mBufferData_.size()/mFrameSize/2*mFrameSize, std::memory_order_relaxed);
 
             ALCint refresh{};
             alcGetIntegerv(alcGetContextsDevice(alcGetCurrentContext()), ALC_REFRESH, 1, &refresh);
@@ -1255,12 +1255,12 @@ int AudioState::handler()
         buffer_len = static_cast<int>(duration_cast<seconds>(mCodecCtx->sample_rate *
             AudioBufferTime).count() * mFrameSize);
     if(buffer_len > 0)
-        samples = std::make_unique<uint8_t[]>(static_cast<ALuint>(buffer_len));
+        samples.resize(static_cast<ALuint>(buffer_len));
 
     /* Prefill the codec buffer. */
     auto packet_sender = [this]()
     {
-        while(1)
+        while(true)
         {
             const int ret{mQueue.sendPacket(mCodecCtx.get())};
             if(ret == AVErrorEOF) break;
@@ -1287,7 +1287,7 @@ int AudioState::handler()
         mCurrentPts += skip;
     }
 
-    while(1)
+    while(true)
     {
         if(mMovie.mQuit.load(std::memory_order_relaxed))
         {
@@ -1299,11 +1299,11 @@ int AudioState::handler()
                 mSamplesLen = decodeFrame();
                 mSamplesPos = mSamplesLen;
             } while(mSamplesLen > 0);
-            goto finish;
+            break;
         }
 
         ALenum state;
-        if(mBufferDataSize > 0)
+        if(!mBufferData_.empty())
         {
             alGetSourcei(mSource, AL_SOURCE_STATE, &state);
 
@@ -1333,13 +1333,13 @@ int AudioState::handler()
                 /* Read the next chunk of data, filling the buffer, and queue
                  * it on the source.
                  */
-                if(!readAudio(samples.get(), static_cast<ALuint>(buffer_len), sync_skip))
+                if(!readAudio(samples.data(), static_cast<ALuint>(buffer_len), sync_skip))
                     break;
 
                 const ALuint bufid{mBuffers[mBufferIdx]};
                 mBufferIdx = static_cast<ALuint>((mBufferIdx+1) % mBuffers.size());
 
-                alBufferData(bufid, mFormat, samples.get(), buffer_len, mCodecCtx->sample_rate);
+                alBufferData(bufid, mFormat, samples.data(), buffer_len, mCodecCtx->sample_rate);
                 alSourceQueueBuffers(mSource, 1, &bufid);
                 ++queued;
             }
@@ -1380,7 +1380,6 @@ int AudioState::handler()
 
         mSrcCond.wait_for(srclock, sleep_time);
     }
-finish:
 
     alSourceRewind(mSource);
     alSourcei(mSource, AL_BUFFER, 0);
@@ -1451,7 +1450,7 @@ void VideoState::updateVideo(SDL_Window *screen, SDL_Renderer *renderer, bool re
 
     auto clocktime = mMovie.getMasterClock();
     bool updated{false};
-    while(1)
+    while(true)
     {
         size_t next_idx{(read_idx+1)%mPictQ.size()};
         if(next_idx == mPictQWrite.load(std::memory_order_acquire))
@@ -1511,9 +1510,9 @@ void VideoState::updateVideo(SDL_Window *screen, SDL_Renderer *renderer, bool re
             {
                 double aspect_ratio = av_q2d(frame->sample_aspect_ratio);
                 if(aspect_ratio >= 1.0)
-                    frame_width = static_cast<int>(frame_width*aspect_ratio + 0.5);
+                    frame_width = static_cast<int>(std::lround(frame_width * aspect_ratio));
                 else if(aspect_ratio > 0.0)
-                    frame_height = static_cast<int>(frame_height/aspect_ratio + 0.5);
+                    frame_height = static_cast<int>(std::lround(frame_height / aspect_ratio));
             }
             SDL_SetWindowSize(screen, frame_width, frame_height);
         }
@@ -1546,18 +1545,15 @@ void VideoState::updateVideo(SDL_Window *screen, SDL_Renderer *renderer, bool re
                 }
 
                 /* point pict at the queue */
-                uint8_t *pict_data[3];
+                std::array<uint8_t*,3> pict_data;
                 pict_data[0] = static_cast<uint8_t*>(pixels);
-                pict_data[1] = pict_data[0] + w*h;
-                pict_data[2] = pict_data[1] + w*h/4;
+                pict_data[1] = pict_data[0] + ptrdiff_t{w}*h;
+                pict_data[2] = pict_data[1] + ptrdiff_t{w}*h/4;
 
-                int pict_linesize[3];
-                pict_linesize[0] = pitch;
-                pict_linesize[1] = pitch / 2;
-                pict_linesize[2] = pitch / 2;
+                std::array pict_linesize{pitch, pitch/2, pitch/2};
 
-                sws_scale(mSwscaleCtx.get(), reinterpret_cast<uint8_t**>(frame->data), frame->linesize,
-                    0, h, pict_data, pict_linesize);
+                sws_scale(mSwscaleCtx.get(), reinterpret_cast<uint8_t**>(frame->data),
+                    frame->linesize, 0, h, pict_data.data(), pict_linesize.data());
                 SDL_UnlockTexture(mImage);
             }
 
@@ -1599,7 +1595,7 @@ int VideoState::handler()
     /* Prefill the codec buffer. */
     auto packet_sender = [this]()
     {
-        while(1)
+        while(true)
         {
             const int ret{mQueue.sendPacket(mCodecCtx.get())};
             if(ret == AVErrorEOF) break;
@@ -1613,7 +1609,7 @@ int VideoState::handler()
     }
 
     auto current_pts = nanoseconds::zero();
-    while(1)
+    while(true)
     {
         size_t write_idx{mPictQWrite.load(std::memory_order_relaxed)};
         Picture *vp{&mPictQ[write_idx]};
@@ -2062,7 +2058,7 @@ int main(int argc, char *argv[])
 
     while(fileidx < argc && !movState)
     {
-        movState = std::unique_ptr<MovieState>{new MovieState{argv[fileidx++]}};
+        movState = std::make_unique<MovieState>(argv[fileidx++]);
         if(!movState->prepare()) movState = nullptr;
     }
     if(!movState)
@@ -2077,7 +2073,7 @@ int main(int argc, char *argv[])
         Next, Quit
     } eom_action{EomAction::Next};
     seconds last_time{seconds::min()};
-    while(1)
+    while(true)
     {
         /* SDL_WaitEventTimeout is broken, just force a 10ms sleep. */
         std::this_thread::sleep_for(milliseconds{10});
@@ -2145,7 +2141,7 @@ int main(int argc, char *argv[])
                     movState = nullptr;
                     while(fileidx < argc && !movState)
                     {
-                        movState = std::unique_ptr<MovieState>{new MovieState{argv[fileidx++]}};
+                        movState = std::make_unique<MovieState>(argv[fileidx++]);
                         if(!movState->prepare()) movState = nullptr;
                     }
                     if(movState)

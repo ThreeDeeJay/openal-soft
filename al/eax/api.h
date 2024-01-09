@@ -22,12 +22,12 @@
 
 
 #ifndef _WIN32
-typedef struct _GUID {
+using GUID = struct _GUID { /* NOLINT(*-reserved-identifier) */
     std::uint32_t Data1;
     std::uint16_t Data2;
     std::uint16_t Data3;
-    std::uint8_t Data4[8];
-} GUID;
+    std::array<std::uint8_t,8> Data4;
+};
 
 inline bool operator==(const GUID& lhs, const GUID& rhs) noexcept
 { return std::memcmp(&lhs, &rhs, sizeof(GUID)) == 0; }
@@ -362,6 +362,7 @@ constexpr auto EAXCONTEXT_MINMACROFXFACTOR = 0.0F;
 constexpr auto EAXCONTEXT_MAXMACROFXFACTOR = 1.0F;
 constexpr auto EAXCONTEXT_DEFAULTMACROFXFACTOR = 0.0F;
 
+constexpr auto EAXCONTEXT_DEFAULTLASTERROR = EAX_OK;
 
 extern const GUID EAXPROPERTYID_EAX40_FXSlot0;
 extern const GUID EAXPROPERTYID_EAX50_FXSlot0;
@@ -654,11 +655,11 @@ struct EAXSPEAKERLEVELPROPERTIES {
 }; // EAXSPEAKERLEVELPROPERTIES
 
 struct EAX40ACTIVEFXSLOTS {
-    GUID guidActiveFXSlots[EAX40_MAX_ACTIVE_FXSLOTS];
+    std::array<GUID,EAX40_MAX_ACTIVE_FXSLOTS> guidActiveFXSlots;
 }; // EAX40ACTIVEFXSLOTS
 
 struct EAX50ACTIVEFXSLOTS {
-    GUID guidActiveFXSlots[EAX50_MAX_ACTIVE_FXSLOTS];
+    std::array<GUID,EAX50_MAX_ACTIVE_FXSLOTS> guidActiveFXSlots;
 }; // EAX50ACTIVEFXSLOTS
 
 // Use this structure for EAXSOURCE_OBSTRUCTIONPARAMETERS property.

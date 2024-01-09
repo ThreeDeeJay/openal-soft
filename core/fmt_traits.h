@@ -1,6 +1,7 @@
 #ifndef CORE_FMT_TRAITS_H
 #define CORE_FMT_TRAITS_H
 
+#include <array>
 #include <cstddef>
 #include <stdint.h>
 
@@ -9,8 +10,8 @@
 
 namespace al {
 
-extern const int16_t muLawDecompressionTable[256];
-extern const int16_t aLawDecompressionTable[256];
+extern const std::array<int16_t,256> muLawDecompressionTable;
+extern const std::array<int16_t,256> aLawDecompressionTable;
 
 
 template<FmtType T>
@@ -29,6 +30,14 @@ struct FmtTypeTraits<FmtShort> {
 
     template<typename OutT>
     static constexpr OutT to(const Type val) noexcept { return val*OutT{1.0/32768.0}; }
+};
+template<>
+struct FmtTypeTraits<FmtInt> {
+    using Type = int32_t;
+
+    template<typename OutT>
+    static constexpr OutT to(const Type val) noexcept
+    { return static_cast<OutT>(val)*OutT{1.0/2147483648.0}; }
 };
 template<>
 struct FmtTypeTraits<FmtFloat> {

@@ -3,9 +3,12 @@
 
 #include "device.h"
 
+#include <cstddef>
 #include <numeric>
-#include <stddef.h>
 
+#include "al/buffer.h"
+#include "al/effect.h"
+#include "al/filter.h"
 #include "albit.h"
 #include "alconfig.h"
 #include "backends/base.h"
@@ -55,8 +58,8 @@ ALCdevice::~ALCdevice()
 
 void ALCdevice::enumerateHrtfs()
 {
-    mHrtfList = EnumerateHrtf(configValue<std::string>(nullptr, "hrtf-paths"));
-    if(auto defhrtfopt = configValue<std::string>(nullptr, "default-hrtf"))
+    mHrtfList = EnumerateHrtf(configValue<std::string>({}, "hrtf-paths"));
+    if(auto defhrtfopt = configValue<std::string>({}, "default-hrtf"))
     {
         auto iter = std::find(mHrtfList.begin(), mHrtfList.end(), *defhrtfopt);
         if(iter == mHrtfList.end())

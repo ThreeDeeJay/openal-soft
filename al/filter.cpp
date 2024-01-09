@@ -49,19 +49,21 @@
 
 namespace {
 
+using SubListAllocator = typename al::allocator<std::array<ALfilter,64>>;
+
 class filter_exception final : public al::base_exception {
     ALenum mErrorCode;
 
 public:
-#ifdef __USE_MINGW_ANSI_STDIO
-    [[gnu::format(gnu_printf, 3, 4)]]
+#ifdef __MINGW32__
+    [[gnu::format(__MINGW_PRINTF_FORMAT, 3, 4)]]
 #else
     [[gnu::format(printf, 3, 4)]]
 #endif
     filter_exception(ALenum code, const char *msg, ...);
     ~filter_exception() override;
 
-    ALenum errorCode() const noexcept { return mErrorCode; }
+    [[nodiscard]] auto errorCode() const noexcept -> ALenum { return mErrorCode; }
 };
 
 filter_exception::filter_exception(ALenum code, const char* msg, ...) : mErrorCode{code}
@@ -80,36 +82,36 @@ void InitFilterParams(ALfilter *filter, ALenum type)
     {
         filter->Gain = AL_LOWPASS_DEFAULT_GAIN;
         filter->GainHF = AL_LOWPASS_DEFAULT_GAINHF;
-        filter->HFReference = LOWPASSFREQREF;
+        filter->HFReference = LowPassFreqRef;
         filter->GainLF = 1.0f;
-        filter->LFReference = HIGHPASSFREQREF;
+        filter->LFReference = HighPassFreqRef;
         filter->mTypeVariant.emplace<LowpassFilterTable>();
     }
     else if(type == AL_FILTER_HIGHPASS)
     {
         filter->Gain = AL_HIGHPASS_DEFAULT_GAIN;
         filter->GainHF = 1.0f;
-        filter->HFReference = LOWPASSFREQREF;
+        filter->HFReference = LowPassFreqRef;
         filter->GainLF = AL_HIGHPASS_DEFAULT_GAINLF;
-        filter->LFReference = HIGHPASSFREQREF;
+        filter->LFReference = HighPassFreqRef;
         filter->mTypeVariant.emplace<HighpassFilterTable>();
     }
     else if(type == AL_FILTER_BANDPASS)
     {
         filter->Gain = AL_BANDPASS_DEFAULT_GAIN;
         filter->GainHF = AL_BANDPASS_DEFAULT_GAINHF;
-        filter->HFReference = LOWPASSFREQREF;
+        filter->HFReference = LowPassFreqRef;
         filter->GainLF = AL_BANDPASS_DEFAULT_GAINLF;
-        filter->LFReference = HIGHPASSFREQREF;
+        filter->LFReference = HighPassFreqRef;
         filter->mTypeVariant.emplace<BandpassFilterTable>();
     }
     else
     {
         filter->Gain = 1.0f;
         filter->GainHF = 1.0f;
-        filter->HFReference = LOWPASSFREQREF;
+        filter->HFReference = LowPassFreqRef;
         filter->GainLF = 1.0f;
-        filter->LFReference = HIGHPASSFREQREF;
+        filter->LFReference = HighPassFreqRef;
         filter->mTypeVariant.emplace<NullFilterTable>();
     }
     filter->type = type;
@@ -121,21 +123,21 @@ bool EnsureFilters(ALCdevice *device, size_t needed)
         [](size_t cur, const FilterSubList &sublist) noexcept -> size_t
         { return cur + static_cast<ALuint>(al::popcount(sublist.FreeMask)); })};
 
-    while(needed > count)
-    {
-        if(device->FilterList.size() >= 1<<25) UNLIKELY
-            return false;
-
-        device->FilterList.emplace_back();
-        auto sublist = device->FilterList.end() - 1;
-        sublist->FreeMask = ~0_u64;
-        sublist->Filters = static_cast<ALfilter*>(al_calloc(alignof(ALfilter), sizeof(ALfilter)*64));
-        if(!sublist->Filters) UNLIKELY
+    try {
+        while(needed > count)
         {
-            device->FilterList.pop_back();
-            return false;
+            if(device->FilterList.size() >= 1<<25) UNLIKELY
+                return false;
+
+            FilterSubList sublist{};
+            sublist.FreeMask = ~0_u64;
+            sublist.Filters = SubListAllocator{}.allocate(1);
+            device->FilterList.emplace_back(std::move(sublist));
+            count += 64;
         }
-        count += 64;
+    }
+    catch(...) {
+        return false;
     }
     return true;
 }
@@ -150,7 +152,7 @@ ALfilter *AllocFilter(ALCdevice *device)
     auto slidx = static_cast<ALuint>(al::countr_zero(sublist->FreeMask));
     ASSUME(slidx < 64);
 
-    ALfilter *filter{al::construct_at(sublist->Filters + slidx)};
+    ALfilter *filter{al::construct_at(al::to_address(sublist->Filters->begin() + slidx))};
     InitFilterParams(filter, AL_FILTER_NULL);
 
     /* Add 1 to avoid filter ID 0. */
@@ -185,7 +187,7 @@ inline ALfilter *LookupFilter(ALCdevice *device, ALuint id)
     FilterSubList &sublist = device->FilterList[lidx];
     if(sublist.FreeMask & (1_u64 << slidx)) UNLIKELY
         return nullptr;
-    return sublist.Filters + slidx;
+    return al::to_address(sublist.Filters->begin() + slidx);
 }
 
 } // namespace
@@ -695,10 +697,10 @@ FilterSubList::~FilterSubList()
     while(usemask)
     {
         const int idx{al::countr_zero(usemask)};
-        std::destroy_at(Filters+idx);
+        std::destroy_at(al::to_address(Filters->begin() + idx));
         usemask &= ~(1_u64 << idx);
     }
     FreeMask = ~usemask;
-    al_free(Filters);
+    SubListAllocator{}.deallocate(Filters, 1);
     Filters = nullptr;
 }

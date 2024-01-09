@@ -159,7 +159,7 @@ void Resample_<CubicTag,SSETag>(const InterpState *state, const float *RESTRICT 
 {
     ASSUME(frac < MixerFracOne);
 
-    const CubicCoefficients *RESTRICT filter = al::assume_aligned<16>(state->cubic.filter);
+    const auto *RESTRICT filter = al::assume_aligned<16>(std::get<CubicState>(*state).filter);
 
     src -= 1;
     for(float &out_sample : dst)
@@ -171,8 +171,8 @@ void Resample_<CubicTag,SSETag>(const InterpState *state, const float *RESTRICT 
         /* Apply the phase interpolated filter. */
 
         /* f = fil + pf*phd */
-        const __m128 f4 = MLA4(_mm_load_ps(filter[pi].mCoeffs), pf4,
-            _mm_load_ps(filter[pi].mDeltas));
+        const __m128 f4 = MLA4(_mm_load_ps(filter[pi].mCoeffs.data()), pf4,
+            _mm_load_ps(filter[pi].mDeltas.data()));
         /* r = f*src */
         __m128 r4{_mm_mul_ps(f4, _mm_loadu_ps(src))};
 
@@ -190,13 +190,14 @@ template<>
 void Resample_<BSincTag,SSETag>(const InterpState *state, const float *RESTRICT src, uint frac,
     const uint increment, const al::span<float> dst)
 {
-    const float *const filter{state->bsinc.filter};
-    const __m128 sf4{_mm_set1_ps(state->bsinc.sf)};
-    const size_t m{state->bsinc.m};
+    const auto &bsinc = std::get<BsincState>(*state);
+    const float *const filter{bsinc.filter};
+    const __m128 sf4{_mm_set1_ps(bsinc.sf)};
+    const size_t m{bsinc.m};
     ASSUME(m > 0);
     ASSUME(frac < MixerFracOne);
 
-    src -= state->bsinc.l;
+    src -= bsinc.l;
     for(float &out_sample : dst)
     {
         // Calculate the phase index and factor.
@@ -207,9 +208,9 @@ void Resample_<BSincTag,SSETag>(const InterpState *state, const float *RESTRICT 
         __m128 r4{_mm_setzero_ps()};
         {
             const __m128 pf4{_mm_set1_ps(pf)};
-            const float *RESTRICT fil{filter + m*pi*2};
+            const float *RESTRICT fil{filter + m*pi*2_uz};
             const float *RESTRICT phd{fil + m};
-            const float *RESTRICT scd{fil + BSincPhaseCount*2*m};
+            const float *RESTRICT scd{fil + BSincPhaseCount*2_uz*m};
             const float *RESTRICT spd{scd + m};
             size_t td{m >> 2};
             size_t j{0u};
@@ -238,12 +239,13 @@ template<>
 void Resample_<FastBSincTag,SSETag>(const InterpState *state, const float *RESTRICT src, uint frac,
     const uint increment, const al::span<float> dst)
 {
-    const float *const filter{state->bsinc.filter};
-    const size_t m{state->bsinc.m};
+    const auto &bsinc = std::get<BsincState>(*state);
+    const float *const filter{bsinc.filter};
+    const size_t m{bsinc.m};
     ASSUME(m > 0);
     ASSUME(frac < MixerFracOne);
 
-    src -= state->bsinc.l;
+    src -= bsinc.l;
     for(float &out_sample : dst)
     {
         // Calculate the phase index and factor.
@@ -254,7 +256,7 @@ void Resample_<FastBSincTag,SSETag>(const InterpState *state, const float *RESTR
         __m128 r4{_mm_setzero_ps()};
         {
             const __m128 pf4{_mm_set1_ps(pf)};
-            const float *RESTRICT fil{filter + m*pi*2};
+            const float *RESTRICT fil{filter + m*pi*2_uz};
             const float *RESTRICT phd{fil + m};
             size_t td{m >> 2};
             size_t j{0u};

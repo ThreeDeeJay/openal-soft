@@ -5,11 +5,12 @@
 #include <array>
 #include <complex>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <iterator>
 #include <memory>
-#include <stdint.h>
 #include <utility>
+#include <vector>
 
 #ifdef HAVE_SSE_INTRINSICS
 #include <xmmintrin.h>
@@ -84,6 +85,7 @@ void LoadSamples(float *RESTRICT dst, const std::byte *src, const size_t srcstep
     {
     HANDLE_FMT(FmtUByte);
     HANDLE_FMT(FmtShort);
+    HANDLE_FMT(FmtInt);
     HANDLE_FMT(FmtFloat);
     HANDLE_FMT(FmtDouble);
     HANDLE_FMT(FmtMulaw);
@@ -189,12 +191,6 @@ void apply_fir(al::span<float> dst, const float *RESTRICT src, const float *REST
 }
 
 
-struct PFFFTSetupDeleter {
-    void operator()(PFFFT_Setup *ptr) { pffft_destroy_setup(ptr); }
-};
-using PFFFTSetupPtr = std::unique_ptr<PFFFT_Setup,PFFFTSetupDeleter>;
-
-
 struct ConvolutionState final : public EffectState {
     FmtChannels mChannels{};
     AmbiLayout mAmbiLayout{};
@@ -206,7 +202,7 @@ struct ConvolutionState final : public EffectState {
     al::vector<std::array<float,ConvolveUpdateSamples>,16> mFilter;
     al::vector<std::array<float,ConvolveUpdateSamples*2>,16> mOutput;
 
-    PFFFTSetupPtr mFft{};
+    PFFFTSetup mFft{};
     alignas(16) std::array<float,ConvolveUpdateSize> mFftBuffer{};
     alignas(16) std::array<float,ConvolveUpdateSize> mFftWorkBuffer{};
 
@@ -217,8 +213,8 @@ struct ConvolutionState final : public EffectState {
         alignas(16) FloatBufferLine mBuffer{};
         float mHfScale{}, mLfScale{};
         BandSplitter mFilter{};
-        float Current[MAX_OUTPUT_CHANNELS]{};
-        float Target[MAX_OUTPUT_CHANNELS]{};
+        std::array<float,MaxOutputChannels> Current{};
+        std::array<float,MaxOutputChannels> Target{};
     };
     std::vector<ChannelData> mChans;
     al::vector<float,16> mComplexData;
@@ -237,16 +233,14 @@ struct ConvolutionState final : public EffectState {
         const EffectTarget target) override;
     void process(const size_t samplesToDo, const al::span<const FloatBufferLine> samplesIn,
         const al::span<FloatBufferLine> samplesOut) override;
-
-    DEF_NEWDEL(ConvolutionState)
 };
 
 void ConvolutionState::NormalMix(const al::span<FloatBufferLine> samplesOut,
     const size_t samplesToDo)
 {
     for(auto &chan : mChans)
-        MixSamples({chan.mBuffer.data(), samplesToDo}, samplesOut, chan.Current, chan.Target,
-            samplesToDo, 0);
+        MixSamples({chan.mBuffer.data(), samplesToDo}, samplesOut, chan.Current.data(),
+            chan.Target.data(), samplesToDo, 0);
 }
 
 void ConvolutionState::UpsampleMix(const al::span<FloatBufferLine> samplesOut,
@@ -256,7 +250,7 @@ void ConvolutionState::UpsampleMix(const al::span<FloatBufferLine> samplesOut,
     {
         const al::span<float> src{chan.mBuffer.data(), samplesToDo};
         chan.mFilter.processScale(src, chan.mHfScale, chan.mLfScale);
-        MixSamples(src, samplesOut, chan.Current, chan.Target, samplesToDo, 0);
+        MixSamples(src, samplesOut, chan.Current.data(), chan.Target.data(), samplesToDo, 0);
     }
 }
 
@@ -269,7 +263,7 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
     static constexpr uint MaxConvolveAmbiOrder{1u};
 
     if(!mFft)
-        mFft = PFFFTSetupPtr{pffft_new_setup(ConvolveUpdateSize, PFFFT_REAL)};
+        mFft = PFFFTSetup{ConvolveUpdateSize, PFFFT_REAL};
 
     mFifoPos = 0;
     mInput.fill(0.0f);
@@ -330,10 +324,10 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
 
     /* Load the samples from the buffer. */
     const size_t srclinelength{RoundUp(buffer->mSampleLen+DecoderPadding, 16)};
-    auto srcsamples = std::make_unique<float[]>(srclinelength * numChannels);
-    std::fill_n(srcsamples.get(), srclinelength * numChannels, 0.0f);
+    auto srcsamples = std::vector<float>(srclinelength * numChannels);
+    std::fill(srcsamples.begin(), srcsamples.end(), 0.0f);
     for(size_t c{0};c < numChannels && c < realChannels;++c)
-        LoadSamples(srcsamples.get() + srclinelength*c, buffer->mData.data() + bytesPerSample*c,
+        LoadSamples(srcsamples.data() + srclinelength*c, buffer->mData.data() + bytesPerSample*c,
             realChannels, buffer->mType, buffer->mSampleLen);
 
     if(IsUHJ(mChannels))
@@ -341,12 +335,11 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
         auto decoder = std::make_unique<UhjDecoderType>();
         std::array<float*,4> samples{};
         for(size_t c{0};c < numChannels;++c)
-            samples[c] = srcsamples.get() + srclinelength*c;
+            samples[c] = srcsamples.data() + srclinelength*c;
         decoder->decode({samples.data(), numChannels}, buffer->mSampleLen, buffer->mSampleLen);
     }
 
-    auto ressamples = std::make_unique<double[]>(buffer->mSampleLen +
-        (resampler ? resampledCount : 0));
+    auto ressamples = std::vector<double>(buffer->mSampleLen + (resampler ? resampledCount : 0));
     auto ffttmp = al::vector<float,16>(ConvolveUpdateSize);
     auto fftbuffer = std::vector<std::complex<double>>(ConvolveUpdateSize);
 
@@ -356,19 +349,20 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
         /* Resample to match the device. */
         if(resampler)
         {
-            std::copy_n(srcsamples.get() + srclinelength*c, buffer->mSampleLen,
-                ressamples.get() + resampledCount);
-            resampler.process(buffer->mSampleLen, ressamples.get()+resampledCount,
-                resampledCount, ressamples.get());
+            std::copy_n(srcsamples.data() + srclinelength*c, buffer->mSampleLen,
+                ressamples.data() + resampledCount);
+            resampler.process(buffer->mSampleLen, ressamples.data()+resampledCount,
+                resampledCount, ressamples.data());
         }
         else
-            std::copy_n(srcsamples.get() + srclinelength*c, buffer->mSampleLen, ressamples.get());
+            std::copy_n(srcsamples.data() + srclinelength*c, buffer->mSampleLen,
+                ressamples.data());
 
         /* Store the first segment's samples in reverse in the time-domain, to
          * apply as a FIR filter.
          */
         const size_t first_size{minz(resampledCount, ConvolveUpdateSamples)};
-        std::transform(ressamples.get(), ressamples.get()+first_size, mFilter[c].rbegin(),
+        std::transform(ressamples.data(), ressamples.data()+first_size, mFilter[c].rbegin(),
             [](const double d) noexcept -> float { return static_cast<float>(d); });
 
         size_t done{first_size};
@@ -399,7 +393,7 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
             /* Reorder backward to make it suitable for pffft_zconvolve and the
              * subsequent pffft_transform(..., PFFFT_BACKWARD).
              */
-            pffft_zreorder(mFft.get(), ffttmp.data(), al::to_address(filteriter), PFFFT_BACKWARD);
+            mFft.zreorder(ffttmp.data(), al::to_address(filteriter), PFFFT_BACKWARD);
             filteriter += ConvolveUpdateSize;
         }
     }
@@ -407,54 +401,61 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
 
 
 void ConvolutionState::update(const ContextBase *context, const EffectSlot *slot,
-    const EffectProps *props, const EffectTarget target)
+    const EffectProps *props_, const EffectTarget target)
 {
     /* TODO: LFE is not mixed to output. This will require each buffer channel
      * to have its own output target since the main mixing buffer won't have an
      * LFE channel (due to being B-Format).
      */
-    static constexpr ChanPosMap MonoMap[1]{
-        { FrontCenter, std::array{0.0f, 0.0f, -1.0f} }
-    }, StereoMap[2]{
-        { FrontLeft,  std::array{-sin30, 0.0f, -cos30} },
-        { FrontRight, std::array{ sin30, 0.0f, -cos30} },
-    }, RearMap[2]{
-        { BackLeft,  std::array{-sin30, 0.0f, cos30} },
-        { BackRight, std::array{ sin30, 0.0f, cos30} },
-    }, QuadMap[4]{
-        { FrontLeft,  std::array{-sin45, 0.0f, -cos45} },
-        { FrontRight, std::array{ sin45, 0.0f, -cos45} },
-        { BackLeft,   std::array{-sin45, 0.0f,  cos45} },
-        { BackRight,  std::array{ sin45, 0.0f,  cos45} },
-    }, X51Map[6]{
-        { FrontLeft,   std::array{-sin30, 0.0f, -cos30} },
-        { FrontRight,  std::array{ sin30, 0.0f, -cos30} },
-        { FrontCenter, std::array{  0.0f, 0.0f, -1.0f} },
-        { LFE, {} },
-        { SideLeft,    std::array{-sin110, 0.0f, -cos110} },
-        { SideRight,   std::array{ sin110, 0.0f, -cos110} },
-    }, X61Map[7]{
-        { FrontLeft,   std::array{-sin30, 0.0f, -cos30} },
-        { FrontRight,  std::array{ sin30, 0.0f, -cos30} },
-        { FrontCenter, std::array{  0.0f, 0.0f, -1.0f} },
-        { LFE, {} },
-        { BackCenter,  std::array{ 0.0f, 0.0f, 1.0f} },
-        { SideLeft,    std::array{-1.0f, 0.0f, 0.0f} },
-        { SideRight,   std::array{ 1.0f, 0.0f, 0.0f} },
-    }, X71Map[8]{
-        { FrontLeft,   std::array{-sin30, 0.0f, -cos30} },
-        { FrontRight,  std::array{ sin30, 0.0f, -cos30} },
-        { FrontCenter, std::array{  0.0f, 0.0f, -1.0f} },
-        { LFE, {} },
-        { BackLeft,    std::array{-sin30, 0.0f, cos30} },
-        { BackRight,   std::array{ sin30, 0.0f, cos30} },
-        { SideLeft,    std::array{ -1.0f, 0.0f, 0.0f} },
-        { SideRight,   std::array{  1.0f, 0.0f, 0.0f} },
+    static constexpr std::array MonoMap{
+        ChanPosMap{FrontCenter, std::array{0.0f, 0.0f, -1.0f}}
+    };
+    static constexpr std::array StereoMap{
+        ChanPosMap{FrontLeft,  std::array{-sin30, 0.0f, -cos30}},
+        ChanPosMap{FrontRight, std::array{ sin30, 0.0f, -cos30}},
+    };
+    static constexpr std::array RearMap{
+        ChanPosMap{BackLeft,  std::array{-sin30, 0.0f, cos30}},
+        ChanPosMap{BackRight, std::array{ sin30, 0.0f, cos30}},
+    };
+    static constexpr std::array QuadMap{
+        ChanPosMap{FrontLeft,  std::array{-sin45, 0.0f, -cos45}},
+        ChanPosMap{FrontRight, std::array{ sin45, 0.0f, -cos45}},
+        ChanPosMap{BackLeft,   std::array{-sin45, 0.0f,  cos45}},
+        ChanPosMap{BackRight,  std::array{ sin45, 0.0f,  cos45}},
+    };
+    static constexpr std::array X51Map{
+        ChanPosMap{FrontLeft,   std::array{-sin30, 0.0f, -cos30}},
+        ChanPosMap{FrontRight,  std::array{ sin30, 0.0f, -cos30}},
+        ChanPosMap{FrontCenter, std::array{  0.0f, 0.0f,  -1.0f}},
+        ChanPosMap{LFE, {}},
+        ChanPosMap{SideLeft,    std::array{-sin110, 0.0f, -cos110}},
+        ChanPosMap{SideRight,   std::array{ sin110, 0.0f, -cos110}},
+    };
+    static constexpr std::array X61Map{
+        ChanPosMap{FrontLeft,   std::array{-sin30, 0.0f, -cos30}},
+        ChanPosMap{FrontRight,  std::array{ sin30, 0.0f, -cos30}},
+        ChanPosMap{FrontCenter, std::array{  0.0f, 0.0f,  -1.0f}},
+        ChanPosMap{LFE, {}},
+        ChanPosMap{BackCenter,  std::array{ 0.0f, 0.0f, 1.0f} },
+        ChanPosMap{SideLeft,    std::array{-1.0f, 0.0f, 0.0f} },
+        ChanPosMap{SideRight,   std::array{ 1.0f, 0.0f, 0.0f} },
+    };
+    static constexpr std::array X71Map{
+        ChanPosMap{FrontLeft,   std::array{-sin30, 0.0f, -cos30}},
+        ChanPosMap{FrontRight,  std::array{ sin30, 0.0f, -cos30}},
+        ChanPosMap{FrontCenter, std::array{  0.0f, 0.0f,  -1.0f}},
+        ChanPosMap{LFE, {}},
+        ChanPosMap{BackLeft,    std::array{-sin30, 0.0f, cos30}},
+        ChanPosMap{BackRight,   std::array{ sin30, 0.0f, cos30}},
+        ChanPosMap{SideLeft,    std::array{ -1.0f, 0.0f,  0.0f}},
+        ChanPosMap{SideRight,   std::array{  1.0f, 0.0f,  0.0f}},
     };
 
     if(mNumConvolveSegs < 1) UNLIKELY
         return;
 
+    auto &props = std::get<ConvolutionProps>(*props_);
     mMix = &ConvolutionState::NormalMix;
 
     for(auto &chan : mChans)
@@ -488,21 +489,19 @@ void ConvolutionState::update(const ContextBase *context, const EffectSlot *slot
         }
         mOutTarget = target.Main->Buffer;
 
-        alu::Vector N{props->Convolution.OrientAt[0], props->Convolution.OrientAt[1],
-            props->Convolution.OrientAt[2], 0.0f};
+        alu::Vector N{props.OrientAt[0], props.OrientAt[1], props.OrientAt[2], 0.0f};
         N.normalize();
-        alu::Vector V{props->Convolution.OrientUp[0], props->Convolution.OrientUp[1],
-            props->Convolution.OrientUp[2], 0.0f};
+        alu::Vector V{props.OrientUp[0], props.OrientUp[1], props.OrientUp[2], 0.0f};
         V.normalize();
         /* Build and normalize right-vector */
         alu::Vector U{N.cross_product(V)};
         U.normalize();
 
-        const float mixmatrix[4][4]{
-            {1.0f,  0.0f,  0.0f,  0.0f},
-            {0.0f,  U[0], -U[1],  U[2]},
-            {0.0f, -V[0],  V[1], -V[2]},
-            {0.0f, -N[0],  N[1], -N[2]},
+        const std::array mixmatrix{
+            std::array{1.0f,  0.0f,  0.0f,  0.0f},
+            std::array{0.0f,  U[0], -U[1],  U[2]},
+            std::array{0.0f, -V[0],  V[1], -V[2]},
+            std::array{0.0f, -N[0],  N[1], -N[2]},
         };
 
         const auto scales = GetAmbiScales(mAmbiScaling);
@@ -641,7 +640,7 @@ void ConvolutionState::process(const size_t samplesToDo,
         /* Calculate the frequency-domain response and add the relevant
          * frequency bins to the FFT history.
          */
-        pffft_transform(mFft.get(), mInput.data(), mComplexData.data() + curseg*ConvolveUpdateSize,
+        mFft.transform(mInput.data(), mComplexData.data() + curseg*ConvolveUpdateSize,
             mFftWorkBuffer.data(), PFFFT_FORWARD);
 
         const float *filter{mComplexData.data() + mNumConvolveSegs*ConvolveUpdateSize};
@@ -654,14 +653,14 @@ void ConvolutionState::process(const size_t samplesToDo,
             const float *input{&mComplexData[curseg*ConvolveUpdateSize]};
             for(size_t s{curseg};s < mNumConvolveSegs;++s)
             {
-                pffft_zconvolve_accumulate(mFft.get(), input, filter, mFftBuffer.data());
+                mFft.zconvolve_accumulate(input, filter, mFftBuffer.data());
                 input += ConvolveUpdateSize;
                 filter += ConvolveUpdateSize;
             }
             input = mComplexData.data();
             for(size_t s{0};s < curseg;++s)
             {
-                pffft_zconvolve_accumulate(mFft.get(), input, filter, mFftBuffer.data());
+                mFft.zconvolve_accumulate(input, filter, mFftBuffer.data());
                 input += ConvolveUpdateSize;
                 filter += ConvolveUpdateSize;
             }
@@ -671,8 +670,8 @@ void ConvolutionState::process(const size_t samplesToDo,
              * second-half samples (and this output's second half is
              * subsequently saved for next time).
              */
-            pffft_transform(mFft.get(), mFftBuffer.data(), mFftBuffer.data(),
-                mFftWorkBuffer.data(), PFFFT_BACKWARD);
+            mFft.transform(mFftBuffer.data(), mFftBuffer.data(), mFftWorkBuffer.data(),
+                PFFFT_BACKWARD);
 
             /* The filter was attenuated, so the response is already scaled. */
             for(size_t i{0};i < ConvolveUpdateSamples;++i)

@@ -50,7 +50,6 @@
 #include <mutex>
 #include <new>
 #include <optional>
-#include <stddef.h>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -69,6 +68,7 @@
 #include "al/filter.h"
 #include "al/listener.h"
 #include "al/source.h"
+#include "alc/events.h"
 #include "albit.h"
 #include "alconfig.h"
 #include "almalloc.h"
@@ -99,6 +99,7 @@
 #include "device.h"
 #include "effects/base.h"
 #include "export_list.h"
+#include "flexarray.h"
 #include "inprogext.h"
 #include "intrusive_ptr.h"
 #include "opthelpers.h"
@@ -173,7 +174,7 @@ BOOL APIENTRY DllMain(HINSTANCE module, DWORD reason, LPVOID /*reserved*/)
     case DLL_PROCESS_ATTACH:
         /* Pin the DLL so we won't get unloaded until the process terminates */
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-            al::bit_cast<WCHAR*>(module), &module);
+            reinterpret_cast<WCHAR*>(module), &module);
         break;
     }
     return TRUE;
@@ -195,66 +196,66 @@ using float2 = std::array<float,2>;
  ************************************************/
 struct BackendInfo {
     const char *name;
-    BackendFactory& (*getFactory)(void);
+    BackendFactory& (*getFactory)();
 };
 
-BackendInfo BackendList[] = {
+std::array BackendList{
 #ifdef HAVE_PIPEWIRE
-    { "pipewire", PipeWireBackendFactory::getFactory },
+    BackendInfo{"pipewire", PipeWireBackendFactory::getFactory},
 #endif
 #ifdef HAVE_PULSEAUDIO
-    { "pulse", PulseBackendFactory::getFactory },
+    BackendInfo{"pulse", PulseBackendFactory::getFactory},
 #endif
 #ifdef HAVE_WASAPI
-    { "wasapi", WasapiBackendFactory::getFactory },
+    BackendInfo{"wasapi", WasapiBackendFactory::getFactory},
 #endif
 #ifdef HAVE_COREAUDIO
-    { "core", CoreAudioBackendFactory::getFactory },
+    BackendInfo{"core", CoreAudioBackendFactory::getFactory},
 #endif
 #ifdef HAVE_OBOE
-    { "oboe", OboeBackendFactory::getFactory },
+    BackendInfo{"oboe", OboeBackendFactory::getFactory},
 #endif
 #ifdef HAVE_OPENSL
-    { "opensl", OSLBackendFactory::getFactory },
+    BackendInfo{"opensl", OSLBackendFactory::getFactory},
 #endif
 #ifdef HAVE_ALSA
-    { "alsa", AlsaBackendFactory::getFactory },
+    BackendInfo{"alsa", AlsaBackendFactory::getFactory},
 #endif
 #ifdef HAVE_SOLARIS
-    { "solaris", SolarisBackendFactory::getFactory },
+    BackendInfo{"solaris", SolarisBackendFactory::getFactory},
 #endif
 #ifdef HAVE_SNDIO
-    { "sndio", SndIOBackendFactory::getFactory },
+    BackendInfo{"sndio", SndIOBackendFactory::getFactory},
 #endif
 #ifdef HAVE_OSS
-    { "oss", OSSBackendFactory::getFactory },
+    BackendInfo{"oss", OSSBackendFactory::getFactory},
 #endif
 #ifdef HAVE_JACK
-    { "jack", JackBackendFactory::getFactory },
+    BackendInfo{"jack", JackBackendFactory::getFactory},
 #endif
 #ifdef HAVE_DSOUND
-    { "dsound", DSoundBackendFactory::getFactory },
+    BackendInfo{"dsound", DSoundBackendFactory::getFactory},
 #endif
 #ifdef HAVE_WINMM
-    { "winmm", WinMMBackendFactory::getFactory },
+    BackendInfo{"winmm", WinMMBackendFactory::getFactory},
 #endif
 #ifdef HAVE_PORTAUDIO
-    { "port", PortBackendFactory::getFactory },
+    BackendInfo{"port", PortBackendFactory::getFactory},
 #endif
 #ifdef HAVE_SDL2
-    { "sdl2", SDL2BackendFactory::getFactory },
+    BackendInfo{"sdl2", SDL2BackendFactory::getFactory},
 #endif
 
-    { "null", NullBackendFactory::getFactory },
+    BackendInfo{"null", NullBackendFactory::getFactory},
 #ifdef HAVE_WAVE
-    { "wave", WaveBackendFactory::getFactory },
+    BackendInfo{"wave", WaveBackendFactory::getFactory},
 #endif
 };
 
 BackendFactory *PlaybackFactory{};
 BackendFactory *CaptureFactory{};
 
-
+/* NOLINTBEGIN(*-avoid-c-arrays) */
 constexpr ALCchar alcNoError[] = "No Error";
 constexpr ALCchar alcErrInvalidDevice[] = "Invalid Device";
 constexpr ALCchar alcErrInvalidContext[] = "Invalid Context";
@@ -269,6 +270,7 @@ constexpr ALCchar alcErrOutOfMemory[] = "Out of Memory";
 
 /* Enumerated device names */
 constexpr ALCchar alcDefaultName[] = "OpenAL Soft\0";
+/* NOLINTEND(*-avoid-c-arrays) */
 
 std::string alcAllDevicesList;
 std::string alcCaptureDeviceList;
@@ -297,6 +299,7 @@ constexpr uint DitherRNGSeed{22222u};
 /************************************************
  * ALC information
  ************************************************/
+/* NOLINTBEGIN(*-avoid-c-arrays) */
 constexpr ALCchar alcNoDeviceExtList[] =
     "ALC_ENUMERATE_ALL_EXT "
     "ALC_ENUMERATION_EXT "
@@ -327,6 +330,7 @@ constexpr ALCchar alcExtensionList[] =
     "ALC_SOFT_pause_device "
     "ALC_SOFT_reopen_device "
     "ALC_SOFT_system_events";
+/* NOLINTEND(*-avoid-c-arrays) */
 constexpr int alcMajorVersion{1};
 constexpr int alcMinorVersion{1};
 
@@ -346,7 +350,7 @@ std::vector<ALCcontext*> ContextList;
 std::recursive_mutex ListLock;
 
 
-void alc_initconfig(void)
+void alc_initconfig()
 {
     if(auto loglevel = al::getenv("ALSOFT_LOGLEVEL"))
     {
@@ -423,7 +427,7 @@ void alc_initconfig(void)
 #ifdef HAVE_NEON
     capfilter |= CPU_CAP_NEON;
 #endif
-    if(auto cpuopt = ConfigValueStr(nullptr, nullptr, "disable-cpu-exts"))
+    if(auto cpuopt = ConfigValueStr({}, {}, "disable-cpu-exts"))
     {
         const char *str{cpuopt->c_str()};
         if(al::strcasecmp(str, "all") == 0)
@@ -476,9 +480,9 @@ void alc_initconfig(void)
         CPUCapFlags = caps & capfilter;
     }
 
-    if(auto priopt = ConfigValueInt(nullptr, nullptr, "rt-prio"))
+    if(auto priopt = ConfigValueInt({}, {}, "rt-prio"))
         RTPrioLevel = *priopt;
-    if(auto limopt = ConfigValueBool(nullptr, nullptr, "rt-time-limit"))
+    if(auto limopt = ConfigValueBool({}, {}, "rt-time-limit"))
         AllowRTTimeLimit = *limopt;
 
     {
@@ -492,18 +496,18 @@ void alc_initconfig(void)
                     return true;
                 return false;
             }
-            return GetConfigValueBool(nullptr, "game_compat", optname, false);
+            return GetConfigValueBool({}, "game_compat", optname, false);
         };
         sBufferSubDataCompat = checkflag("__ALSOFT_ENABLE_SUB_DATA_EXT", "enable-sub-data-ext");
         compatflags.set(CompatFlags::ReverseX, checkflag("__ALSOFT_REVERSE_X", "reverse-x"));
         compatflags.set(CompatFlags::ReverseY, checkflag("__ALSOFT_REVERSE_Y", "reverse-y"));
         compatflags.set(CompatFlags::ReverseZ, checkflag("__ALSOFT_REVERSE_Z", "reverse-z"));
 
-        aluInit(compatflags, ConfigValueFloat(nullptr, "game_compat", "nfc-scale").value_or(1.0f));
+        aluInit(compatflags, ConfigValueFloat({}, "game_compat", "nfc-scale").value_or(1.0f));
     }
-    Voice::InitMixer(ConfigValueStr(nullptr, nullptr, "resampler"));
+    Voice::InitMixer(ConfigValueStr({}, {}, "resampler"));
 
-    if(auto uhjfiltopt = ConfigValueStr(nullptr, "uhj", "decode-filter"))
+    if(auto uhjfiltopt = ConfigValueStr({}, "uhj", "decode-filter"))
     {
         if(al::strcasecmp(uhjfiltopt->c_str(), "fir256") == 0)
             UhjDecodeQuality = UhjQualityType::FIR256;
@@ -514,7 +518,7 @@ void alc_initconfig(void)
         else
             WARN("Unsupported uhj/decode-filter: %s\n", uhjfiltopt->c_str());
     }
-    if(auto uhjfiltopt = ConfigValueStr(nullptr, "uhj", "encode-filter"))
+    if(auto uhjfiltopt = ConfigValueStr({}, "uhj", "encode-filter"))
     {
         if(al::strcasecmp(uhjfiltopt->c_str(), "fir256") == 0)
             UhjEncodeQuality = UhjQualityType::FIR256;
@@ -540,17 +544,17 @@ void alc_initconfig(void)
             TrapALError = al::strcasecmp(traperr->c_str(), "true") == 0
                 || strtol(traperr->c_str(), nullptr, 0) == 1;
         else
-            TrapALError = !!GetConfigValueBool(nullptr, nullptr, "trap-al-error", false);
+            TrapALError = GetConfigValueBool({}, {}, "trap-al-error", false);
 
         traperr = al::getenv("ALSOFT_TRAP_ALC_ERROR");
         if(traperr)
             TrapALCError = al::strcasecmp(traperr->c_str(), "true") == 0
                 || strtol(traperr->c_str(), nullptr, 0) == 1;
         else
-            TrapALCError = !!GetConfigValueBool(nullptr, nullptr, "trap-alc-error", false);
+            TrapALCError = GetConfigValueBool({}, {}, "trap-alc-error", false);
     }
 
-    if(auto boostopt = ConfigValueFloat(nullptr, "reverb", "boost"))
+    if(auto boostopt = ConfigValueFloat({}, "reverb", "boost"))
     {
         const float valf{std::isfinite(*boostopt) ? clampf(*boostopt, -24.0f, 24.0f) : 0.0f};
         ReverbBoost *= std::pow(10.0f, valf / 20.0f);
@@ -558,7 +562,8 @@ void alc_initconfig(void)
 
     auto BackendListEnd = std::end(BackendList);
     auto devopt = al::getenv("ALSOFT_DRIVERS");
-    if(devopt || (devopt=ConfigValueStr(nullptr, nullptr, "drivers")))
+    if(!devopt) devopt = ConfigValueStr({}, {}, "drivers");
+    if(devopt)
     {
         auto backendlist_cur = std::begin(BackendList);
 
@@ -644,7 +649,7 @@ void alc_initconfig(void)
     if(!CaptureFactory)
         WARN("No capture backend available!\n");
 
-    if(auto exclopt = ConfigValueStr(nullptr, nullptr, "excludefx"))
+    if(auto exclopt = ConfigValueStr({}, {}, "excludefx"))
     {
         const char *next{exclopt->c_str()};
         do {
@@ -659,21 +664,19 @@ void alc_initconfig(void)
             {
                 if(len == strlen(effectitem.name) &&
                    strncmp(effectitem.name, str, len) == 0)
-                    DisabledEffects[effectitem.type] = true;
+                    DisabledEffects.set(effectitem.type);
             }
         } while(next++);
     }
 
     InitEffect(&ALCcontext::sDefaultEffect);
     auto defrevopt = al::getenv("ALSOFT_DEFAULT_REVERB");
-    if(defrevopt || (defrevopt=ConfigValueStr(nullptr, nullptr, "default-reverb")))
-        LoadReverbPreset(defrevopt->c_str(), &ALCcontext::sDefaultEffect);
+    if(!defrevopt) defrevopt = ConfigValueStr({}, {}, "default-reverb");
+    if(defrevopt) LoadReverbPreset(defrevopt->c_str(), &ALCcontext::sDefaultEffect);
 
 #ifdef ALSOFT_EAX
     {
-        static constexpr char eax_block_name[] = "eax";
-
-        if(const auto eax_enable_opt = ConfigValueBool(nullptr, eax_block_name, "enable"))
+        if(const auto eax_enable_opt = ConfigValueBool({}, "eax", "enable"))
         {
             eax_g_is_enabled = *eax_enable_opt;
             if(!eax_g_is_enabled)
@@ -682,15 +685,15 @@ void alc_initconfig(void)
         else
             eax_g_is_enabled = true;
 
-        if((DisabledEffects[EAXREVERB_EFFECT] || DisabledEffects[CHORUS_EFFECT])
+        if((DisabledEffects.test(EAXREVERB_EFFECT) || DisabledEffects.test(CHORUS_EFFECT))
             && eax_g_is_enabled)
         {
             eax_g_is_enabled = false;
             TRACE("EAX disabled because %s disabled.\n",
-                (DisabledEffects[EAXREVERB_EFFECT] && DisabledEffects[CHORUS_EFFECT])
+                (DisabledEffects.test(EAXREVERB_EFFECT) && DisabledEffects.test(CHORUS_EFFECT))
                     ? "EAXReverb and Chorus are" :
-                DisabledEffects[EAXREVERB_EFFECT] ? "EAXReverb is" :
-                DisabledEffects[CHORUS_EFFECT] ? "Chorus is" : "");
+                DisabledEffects.test(EAXREVERB_EFFECT) ? "EAXReverb is" :
+                DisabledEffects.test(CHORUS_EFFECT) ? "Chorus is" : "");
         }
     }
 #endif // ALSOFT_EAX
@@ -735,34 +738,45 @@ void ProbeCaptureDeviceList()
 struct DevFmtPair { DevFmtChannels chans; DevFmtType type; };
 std::optional<DevFmtPair> DecomposeDevFormat(ALenum format)
 {
-    static const struct {
+    struct FormatType {
         ALenum format;
         DevFmtChannels channels;
         DevFmtType type;
-    } list[] = {
-        { AL_FORMAT_MONO8,        DevFmtMono, DevFmtUByte },
-        { AL_FORMAT_MONO16,       DevFmtMono, DevFmtShort },
-        { AL_FORMAT_MONO_FLOAT32, DevFmtMono, DevFmtFloat },
+    };
+    static constexpr std::array list{
+        FormatType{AL_FORMAT_MONO8,    DevFmtMono, DevFmtUByte},
+        FormatType{AL_FORMAT_MONO16,   DevFmtMono, DevFmtShort},
+        FormatType{AL_FORMAT_MONO_I32, DevFmtMono, DevFmtInt},
+        FormatType{AL_FORMAT_MONO_FLOAT32, DevFmtMono, DevFmtFloat},
 
-        { AL_FORMAT_STEREO8,        DevFmtStereo, DevFmtUByte },
-        { AL_FORMAT_STEREO16,       DevFmtStereo, DevFmtShort },
-        { AL_FORMAT_STEREO_FLOAT32, DevFmtStereo, DevFmtFloat },
+        FormatType{AL_FORMAT_STEREO8,    DevFmtStereo, DevFmtUByte},
+        FormatType{AL_FORMAT_STEREO16,   DevFmtStereo, DevFmtShort},
+        FormatType{AL_FORMAT_STEREO_I32, DevFmtStereo, DevFmtInt},
+        FormatType{AL_FORMAT_STEREO_FLOAT32, DevFmtStereo, DevFmtFloat},
 
-        { AL_FORMAT_QUAD8,  DevFmtQuad, DevFmtUByte },
-        { AL_FORMAT_QUAD16, DevFmtQuad, DevFmtShort },
-        { AL_FORMAT_QUAD32, DevFmtQuad, DevFmtFloat },
+        FormatType{AL_FORMAT_QUAD8,    DevFmtQuad, DevFmtUByte},
+        FormatType{AL_FORMAT_QUAD16,   DevFmtQuad, DevFmtShort},
+        FormatType{AL_FORMAT_QUAD32,   DevFmtQuad, DevFmtFloat},
+        FormatType{AL_FORMAT_QUAD_I32, DevFmtQuad, DevFmtInt},
+        FormatType{AL_FORMAT_QUAD_FLOAT32, DevFmtQuad, DevFmtFloat},
 
-        { AL_FORMAT_51CHN8,  DevFmtX51, DevFmtUByte },
-        { AL_FORMAT_51CHN16, DevFmtX51, DevFmtShort },
-        { AL_FORMAT_51CHN32, DevFmtX51, DevFmtFloat },
+        FormatType{AL_FORMAT_51CHN8,    DevFmtX51, DevFmtUByte},
+        FormatType{AL_FORMAT_51CHN16,   DevFmtX51, DevFmtShort},
+        FormatType{AL_FORMAT_51CHN32,   DevFmtX51, DevFmtFloat},
+        FormatType{AL_FORMAT_51CHN_I32, DevFmtX51, DevFmtInt},
+        FormatType{AL_FORMAT_51CHN_FLOAT32, DevFmtX51, DevFmtFloat},
 
-        { AL_FORMAT_61CHN8,  DevFmtX61, DevFmtUByte },
-        { AL_FORMAT_61CHN16, DevFmtX61, DevFmtShort },
-        { AL_FORMAT_61CHN32, DevFmtX61, DevFmtFloat },
+        FormatType{AL_FORMAT_61CHN8,    DevFmtX61, DevFmtUByte},
+        FormatType{AL_FORMAT_61CHN16,   DevFmtX61, DevFmtShort},
+        FormatType{AL_FORMAT_61CHN32,   DevFmtX61, DevFmtFloat},
+        FormatType{AL_FORMAT_61CHN_I32, DevFmtX61, DevFmtInt},
+        FormatType{AL_FORMAT_61CHN_FLOAT32, DevFmtX61, DevFmtFloat},
 
-        { AL_FORMAT_71CHN8,  DevFmtX71, DevFmtUByte },
-        { AL_FORMAT_71CHN16, DevFmtX71, DevFmtShort },
-        { AL_FORMAT_71CHN32, DevFmtX71, DevFmtFloat },
+        FormatType{AL_FORMAT_71CHN8,    DevFmtX71, DevFmtUByte},
+        FormatType{AL_FORMAT_71CHN16,   DevFmtX71, DevFmtShort},
+        FormatType{AL_FORMAT_71CHN32,   DevFmtX71, DevFmtFloat},
+        FormatType{AL_FORMAT_71CHN_I32, DevFmtX71, DevFmtInt},
+        FormatType{AL_FORMAT_71CHN_FLOAT32, DevFmtX71, DevFmtFloat},
     };
 
     for(const auto &item : list)
@@ -880,73 +894,60 @@ ALCenum EnumFromDevAmbi(DevAmbiScaling scaling)
 }
 
 
-/* Downmixing channel arrays, to map the given format's missing channels to
- * existing ones. Based on Wine's DSound downmix values, which are based on
- * PulseAudio's.
+/* Downmixing channel arrays, to map a device format's missing channels to
+ * existing ones. Based on what PipeWire does, though simplified.
  */
-constexpr std::array<InputRemixMap::TargetMix,2> FrontStereoSplit{{
-    {FrontLeft, 0.5f}, {FrontRight, 0.5f}
-}};
-constexpr std::array<InputRemixMap::TargetMix,1> FrontLeft9{{
-    {FrontLeft, 1.0f/9.0f}
-}};
-constexpr std::array<InputRemixMap::TargetMix,1> FrontRight9{{
-    {FrontRight, 1.0f/9.0f}
-}};
-constexpr std::array<InputRemixMap::TargetMix,2> BackMonoToFrontSplit{{
-    {FrontLeft, 0.5f/9.0f}, {FrontRight, 0.5f/9.0f}
-}};
-constexpr std::array<InputRemixMap::TargetMix,2> LeftStereoSplit{{
-    {FrontLeft, 0.5f}, {BackLeft, 0.5f}
-}};
-constexpr std::array<InputRemixMap::TargetMix,2> RightStereoSplit{{
-    {FrontRight, 0.5f}, {BackRight, 0.5f}
-}};
-constexpr std::array<InputRemixMap::TargetMix,2> BackStereoSplit{{
-    {BackLeft, 0.5f}, {BackRight, 0.5f}
-}};
-constexpr std::array<InputRemixMap::TargetMix,2> SideStereoSplit{{
-    {SideLeft, 0.5f}, {SideRight, 0.5f}
-}};
-constexpr std::array<InputRemixMap::TargetMix,1> ToSideLeft{{
-    {SideLeft, 1.0f}
-}};
-constexpr std::array<InputRemixMap::TargetMix,1> ToSideRight{{
-    {SideRight, 1.0f}
-}};
-constexpr std::array<InputRemixMap::TargetMix,2> BackLeftSplit{{
-    {SideLeft, 0.5f}, {BackCenter, 0.5f}
-}};
-constexpr std::array<InputRemixMap::TargetMix,2> BackRightSplit{{
-    {SideRight, 0.5f}, {BackCenter, 0.5f}
-}};
+constexpr float inv_sqrt2f{static_cast<float>(1.0 / al::numbers::sqrt2)};
+constexpr std::array FrontStereo3dB{
+    InputRemixMap::TargetMix{FrontLeft, inv_sqrt2f},
+    InputRemixMap::TargetMix{FrontRight, inv_sqrt2f}
+};
+constexpr std::array FrontStereo6dB{
+    InputRemixMap::TargetMix{FrontLeft, 0.5f},
+    InputRemixMap::TargetMix{FrontRight, 0.5f}
+};
+constexpr std::array SideStereo3dB{
+    InputRemixMap::TargetMix{SideLeft, inv_sqrt2f},
+    InputRemixMap::TargetMix{SideRight, inv_sqrt2f}
+};
+constexpr std::array BackStereo3dB{
+    InputRemixMap::TargetMix{BackLeft, inv_sqrt2f},
+    InputRemixMap::TargetMix{BackRight, inv_sqrt2f}
+};
+constexpr std::array FrontLeft3dB{InputRemixMap::TargetMix{FrontLeft, inv_sqrt2f}};
+constexpr std::array FrontRight3dB{InputRemixMap::TargetMix{FrontRight, inv_sqrt2f}};
+constexpr std::array SideLeft0dB{InputRemixMap::TargetMix{SideLeft, 1.0f}};
+constexpr std::array SideRight0dB{InputRemixMap::TargetMix{SideRight, 1.0f}};
+constexpr std::array BackLeft0dB{InputRemixMap::TargetMix{BackLeft, 1.0f}};
+constexpr std::array BackRight0dB{InputRemixMap::TargetMix{BackRight, 1.0f}};
+constexpr std::array BackCenter3dB{InputRemixMap::TargetMix{BackCenter, inv_sqrt2f}};
 
-const std::array<InputRemixMap,6> StereoDownmix{{
-    { FrontCenter, FrontStereoSplit },
-    { SideLeft,    FrontLeft9 },
-    { SideRight,   FrontRight9 },
-    { BackLeft,    FrontLeft9 },
-    { BackRight,   FrontRight9 },
-    { BackCenter,  BackMonoToFrontSplit },
-}};
-const std::array<InputRemixMap,4> QuadDownmix{{
-    { FrontCenter, FrontStereoSplit },
-    { SideLeft,    LeftStereoSplit },
-    { SideRight,   RightStereoSplit },
-    { BackCenter,  BackStereoSplit },
-}};
-const std::array<InputRemixMap,3> X51Downmix{{
-    { BackLeft,   ToSideLeft },
-    { BackRight,  ToSideRight },
-    { BackCenter, SideStereoSplit },
-}};
-const std::array<InputRemixMap,2> X61Downmix{{
-    { BackLeft,  BackLeftSplit },
-    { BackRight, BackRightSplit },
-}};
-const std::array<InputRemixMap,1> X71Downmix{{
-    { BackCenter, BackStereoSplit },
-}};
+constexpr std::array StereoDownmix{
+    InputRemixMap{FrontCenter, FrontStereo3dB},
+    InputRemixMap{SideLeft,    FrontLeft3dB},
+    InputRemixMap{SideRight,   FrontRight3dB},
+    InputRemixMap{BackLeft,    FrontLeft3dB},
+    InputRemixMap{BackRight,   FrontRight3dB},
+    InputRemixMap{BackCenter,  FrontStereo6dB},
+};
+constexpr std::array QuadDownmix{
+    InputRemixMap{FrontCenter, FrontStereo3dB},
+    InputRemixMap{SideLeft,    BackLeft0dB},
+    InputRemixMap{SideRight,   BackRight0dB},
+    InputRemixMap{BackCenter,  BackStereo3dB},
+};
+constexpr std::array X51Downmix{
+    InputRemixMap{BackLeft,   SideLeft0dB},
+    InputRemixMap{BackRight,  SideRight0dB},
+    InputRemixMap{BackCenter, SideStereo3dB},
+};
+constexpr std::array X61Downmix{
+    InputRemixMap{BackLeft,  BackCenter3dB},
+    InputRemixMap{BackRight, BackCenter3dB},
+};
+constexpr std::array X71Downmix{
+    InputRemixMap{BackCenter, BackStereo3dB},
+};
 
 
 std::unique_ptr<Compressor> CreateDeviceLimiter(const ALCdevice *device, const float threshold)
@@ -978,10 +979,14 @@ std::unique_ptr<Compressor> CreateDeviceLimiter(const ALCdevice *device, const f
  */
 inline void UpdateClockBase(ALCdevice *device)
 {
-    IncrementRef(device->MixCount);
-    device->ClockBase += nanoseconds{seconds{device->SamplesDone}} / device->Frequency;
-    device->SamplesDone = 0;
-    IncrementRef(device->MixCount);
+    const auto mixLock = device->getWriteMixLock();
+
+    auto samplesDone = device->mSamplesDone.load(std::memory_order_relaxed);
+    auto clockBase = device->mClockBase.load(std::memory_order_relaxed);
+
+    clockBase += nanoseconds{seconds{samplesDone}} / device->Frequency;
+    device->mClockBase.store(clockBase, std::memory_order_relaxed);
+    device->mSamplesDone.store(0, std::memory_order_relaxed);
 }
 
 /**
@@ -1006,8 +1011,8 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
     std::optional<DevFmtType> opttype;
     std::optional<DevAmbiLayout> optlayout;
     std::optional<DevAmbiScaling> optscale;
-    uint period_size{DEFAULT_UPDATE_SIZE};
-    uint buffer_size{DEFAULT_UPDATE_SIZE * DEFAULT_NUM_UPDATES};
+    uint period_size{DefaultUpdateSize};
+    uint buffer_size{DefaultUpdateSize * DefaultNumUpdates};
     int hrtf_id{-1};
     uint aorder{0u};
 
@@ -1015,71 +1020,73 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
     {
         /* Get default settings from the user configuration */
 
-        if(auto freqopt = device->configValue<uint>(nullptr, "frequency"))
+        if(auto freqopt = device->configValue<uint>({}, "frequency"))
         {
-            optsrate = clampu(*freqopt, MIN_OUTPUT_RATE, MAX_OUTPUT_RATE);
+            optsrate = clampu(*freqopt, MinOutputRate, MaxOutputRate);
 
-            const double scale{static_cast<double>(*optsrate) / DEFAULT_OUTPUT_RATE};
-            period_size = static_cast<uint>(period_size*scale + 0.5);
+            const double scale{static_cast<double>(*optsrate) / double{DefaultOutputRate}};
+            period_size = static_cast<uint>(std::lround(period_size * scale));
         }
 
-        if(auto persizeopt = device->configValue<uint>(nullptr, "period_size"))
+        if(auto persizeopt = device->configValue<uint>({}, "period_size"))
             period_size = clampu(*persizeopt, 64, 8192);
-        if(auto numperopt = device->configValue<uint>(nullptr, "periods"))
+        if(auto numperopt = device->configValue<uint>({}, "periods"))
             buffer_size = clampu(*numperopt, 2, 16) * period_size;
         else
-            buffer_size = period_size * DEFAULT_NUM_UPDATES;
+            buffer_size = period_size * uint{DefaultNumUpdates};
 
-        if(auto typeopt = device->configValue<std::string>(nullptr, "sample-type"))
+        if(auto typeopt = device->configValue<std::string>({}, "sample-type"))
         {
-            static constexpr struct TypeMap {
-                const char name[8];
+            struct TypeMap {
+                const char name[8]; /* NOLINT(*-avoid-c-arrays) */
                 DevFmtType type;
-            } typelist[] = {
-                { "int8",    DevFmtByte   },
-                { "uint8",   DevFmtUByte  },
-                { "int16",   DevFmtShort  },
-                { "uint16",  DevFmtUShort },
-                { "int32",   DevFmtInt    },
-                { "uint32",  DevFmtUInt   },
-                { "float32", DevFmtFloat  },
+            };
+            static constexpr std::array typelist{
+                TypeMap{"int8",    DevFmtByte  },
+                TypeMap{"uint8",   DevFmtUByte },
+                TypeMap{"int16",   DevFmtShort },
+                TypeMap{"uint16",  DevFmtUShort},
+                TypeMap{"int32",   DevFmtInt   },
+                TypeMap{"uint32",  DevFmtUInt  },
+                TypeMap{"float32", DevFmtFloat },
             };
 
             const ALCchar *fmt{typeopt->c_str()};
-            auto iter = std::find_if(std::begin(typelist), std::end(typelist),
+            auto iter = std::find_if(typelist.begin(), typelist.end(),
                 [fmt](const TypeMap &entry) -> bool
                 { return al::strcasecmp(entry.name, fmt) == 0; });
-            if(iter == std::end(typelist))
+            if(iter == typelist.end())
                 ERR("Unsupported sample-type: %s\n", fmt);
             else
                 opttype = iter->type;
         }
-        if(auto chanopt = device->configValue<std::string>(nullptr, "channels"))
+        if(auto chanopt = device->configValue<std::string>({}, "channels"))
         {
-            static constexpr struct ChannelMap {
-                const char name[16];
+            struct ChannelMap {
+                const char name[16]; /* NOLINT(*-avoid-c-arrays) */
                 DevFmtChannels chans;
                 uint8_t order;
-            } chanlist[] = {
-                { "mono",       DevFmtMono,   0 },
-                { "stereo",     DevFmtStereo, 0 },
-                { "quad",       DevFmtQuad,   0 },
-                { "surround51", DevFmtX51,    0 },
-                { "surround61", DevFmtX61,    0 },
-                { "surround71", DevFmtX71,    0 },
-                { "surround714", DevFmtX714,  0 },
-                { "surround3d71", DevFmtX3D71, 0 },
-                { "surround51rear", DevFmtX51, 0 },
-                { "ambi1", DevFmtAmbi3D, 1 },
-                { "ambi2", DevFmtAmbi3D, 2 },
-                { "ambi3", DevFmtAmbi3D, 3 },
+            };
+            static constexpr std::array chanlist{
+                ChannelMap{"mono",       DevFmtMono,   0},
+                ChannelMap{"stereo",     DevFmtStereo, 0},
+                ChannelMap{"quad",       DevFmtQuad,   0},
+                ChannelMap{"surround51", DevFmtX51,    0},
+                ChannelMap{"surround61", DevFmtX61,    0},
+                ChannelMap{"surround71", DevFmtX71,    0},
+                ChannelMap{"surround714", DevFmtX714,  0},
+                ChannelMap{"surround3d71", DevFmtX3D71, 0},
+                ChannelMap{"surround51rear", DevFmtX51, 0},
+                ChannelMap{"ambi1", DevFmtAmbi3D, 1},
+                ChannelMap{"ambi2", DevFmtAmbi3D, 2},
+                ChannelMap{"ambi3", DevFmtAmbi3D, 3},
             };
 
             const ALCchar *fmt{chanopt->c_str()};
-            auto iter = std::find_if(std::begin(chanlist), std::end(chanlist),
+            auto iter = std::find_if(chanlist.begin(), chanlist.end(),
                 [fmt](const ChannelMap &entry) -> bool
                 { return al::strcasecmp(entry.name, fmt) == 0; });
-            if(iter == std::end(chanlist))
+            if(iter == chanlist.end())
                 ERR("Unsupported channels: %s\n", fmt);
             else
             {
@@ -1087,7 +1094,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
                 aorder = iter->order;
             }
         }
-        if(auto ambiopt = device->configValue<std::string>(nullptr, "ambi-format"))
+        if(auto ambiopt = device->configValue<std::string>({}, "ambi-format"))
         {
             const ALCchar *fmt{ambiopt->c_str()};
             if(al::strcasecmp(fmt, "fuma") == 0)
@@ -1114,7 +1121,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
                 ERR("Unsupported ambi-format: %s\n", fmt);
         }
 
-        if(auto hrtfopt = device->configValue<std::string>(nullptr, "hrtf"))
+        if(auto hrtfopt = device->configValue<std::string>({}, "hrtf"))
         {
             WARN("general/hrtf is deprecated, please use stereo-encoding instead\n");
 
@@ -1131,7 +1138,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
         }
     }
 
-    if(auto encopt = device->configValue<std::string>(nullptr, "stereo-encoding"))
+    if(auto encopt = device->configValue<std::string>({}, "stereo-encoding"))
     {
         const char *mode{encopt->c_str()};
         if(al::strcasecmp(mode, "basic") == 0 || al::strcasecmp(mode, "panpot") == 0)
@@ -1199,7 +1206,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
             case ATTRIBUTE(ALC_MAX_AUXILIARY_SENDS)
                 numSends = static_cast<uint>(attrList[attrIdx + 1]);
                 if(numSends > INT_MAX) numSends = 0;
-                else numSends = minu(numSends, MAX_SENDS);
+                else numSends = minu(numSends, MaxSendCount);
                 break;
 
             case ATTRIBUTE(ALC_HRTF_SOFT)
@@ -1242,7 +1249,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
         {
             if(!optchans || !opttype)
                 return ALC_INVALID_VALUE;
-            if(freqAttr < MIN_OUTPUT_RATE || freqAttr > MAX_OUTPUT_RATE)
+            if(freqAttr < int{MinOutputRate} || freqAttr > int{MaxOutputRate})
                 return ALC_INVALID_VALUE;
             if(*optchans == DevFmtAmbi3D)
             {
@@ -1319,12 +1326,12 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
 
             if(freqAttr)
             {
-                uint oldrate = optsrate.value_or(DEFAULT_OUTPUT_RATE);
-                freqAttr = clampi(freqAttr, MIN_OUTPUT_RATE, MAX_OUTPUT_RATE);
+                uint oldrate = optsrate.value_or(DefaultOutputRate);
+                freqAttr = clampi(freqAttr, MinOutputRate, MaxOutputRate);
 
                 const double scale{static_cast<double>(freqAttr) / oldrate};
-                period_size = static_cast<uint>(period_size*scale + 0.5);
-                buffer_size = static_cast<uint>(buffer_size*scale + 0.5);
+                period_size = static_cast<uint>(std::lround(period_size * scale));
+                buffer_size = static_cast<uint>(std::lround(buffer_size * scale));
                 optsrate = static_cast<uint>(freqAttr);
             }
         }
@@ -1332,16 +1339,19 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
         /* If a context is already running on the device, stop playback so the
          * device attributes can be updated.
          */
-        if(device->Flags.test(DeviceRunning))
+        if(device->mDeviceState == DeviceState::Playing)
+        {
             device->Backend->stop();
-        device->Flags.reset(DeviceRunning);
+            device->mDeviceState = DeviceState::Unprepared;
+        }
 
         UpdateClockBase(device);
     }
 
-    if(device->Flags.test(DeviceRunning))
+    if(device->mDeviceState == DeviceState::Playing)
         return ALC_NO_ERROR;
 
+    device->mDeviceState = DeviceState::Unprepared;
     device->AvgSpeakerDist = 0.0f;
     device->mNFCtrlFilter = NfcFilter{};
     device->mUhjEncoder = nullptr;
@@ -1395,7 +1405,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
         device->mAmbiOrder = 0;
         device->BufferSize = buffer_size;
         device->UpdateSize = period_size;
-        device->Frequency = optsrate.value_or(DEFAULT_OUTPUT_RATE);
+        device->Frequency = optsrate.value_or(DefaultOutputRate);
         device->Flags.set(FrequencyRequest, optsrate.has_value())
             .set(ChannelsRequest, optchans.has_value())
             .set(SampleTypeRequest, opttype.has_value());
@@ -1464,7 +1474,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
 
     if(device->Type != DeviceType::Loopback)
     {
-        if(auto modeopt = device->configValue<std::string>(nullptr, "stereo-mode"))
+        if(auto modeopt = device->configValue<std::string>({}, "stereo-mode"))
         {
             const char *mode{modeopt->c_str()};
             if(al::strcasecmp(mode, "headphones") == 0)
@@ -1481,7 +1491,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
     /* Calculate the max number of sources, and split them between the mono and
      * stereo count given the requested number of stereo sources.
      */
-    if(auto srcsopt = device->configValue<uint>(nullptr, "sources"))
+    if(auto srcsopt = device->configValue<uint>({}, "sources"))
     {
         if(*srcsopt <= 0) numMono = 256;
         else numMono = maxu(*srcsopt, 16);
@@ -1497,8 +1507,8 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
     device->NumMonoSources = numMono;
     device->NumStereoSources = numStereo;
 
-    if(auto sendsopt = device->configValue<int>(nullptr, "sends"))
-        numSends = minu(numSends, static_cast<uint>(clampi(*sendsopt, 0, MAX_SENDS)));
+    if(auto sendsopt = device->configValue<int>({}, "sends"))
+        numSends = minu(numSends, static_cast<uint>(clampi(*sendsopt, 0, MaxSendCount)));
     device->NumAuxSends = numSends;
 
     TRACE("Max sources: %d (%d + %d), effect slots: %d, sends: %d\n",
@@ -1521,13 +1531,13 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
     case DevFmtAmbi3D: break;
     }
 
-    nanoseconds::rep sample_delay{0};
+    size_t sample_delay{0};
     if(auto *encoder{device->mUhjEncoder.get()})
         sample_delay += encoder->getDelay();
 
-    if(device->getConfigValueBool(nullptr, "dither", true))
+    if(device->getConfigValueBool({}, "dither", true))
     {
-        int depth{device->configValue<int>(nullptr, "dither-depth").value_or(0)};
+        int depth{device->configValue<int>({}, "dither-depth").value_or(0)};
         if(depth <= 0)
         {
             switch(device->FmtType)
@@ -1560,7 +1570,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
               device->DitherDepth);
 
     if(!optlimit)
-        optlimit = device->configValue<bool>(nullptr, "output-limiter");
+        optlimit = device->configValue<bool>({}, "output-limiter");
 
     /* If the gain limiter is unset, use the limiter for integer-based output
      * (where samples must be clamped), and don't for floating-point (which can
@@ -1614,6 +1624,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
     }
 
     /* Convert the sample delay from samples to nanosamples to nanoseconds. */
+    sample_delay = std::min<size_t>(sample_delay, std::numeric_limits<int>::max());
     device->FixedLatency += nanoseconds{seconds{sample_delay}} / device->Frequency;
     TRACE("Fixed device latency: %" PRId64 "ns\n", int64_t{device->FixedLatency.count()});
 
@@ -1626,9 +1637,10 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
         std::unique_lock<std::mutex> slotlock{context->mEffectSlotLock};
 
         /* Clear out unused effect slot clusters. */
-        auto slot_cluster_not_in_use = [](ContextBase::EffectSlotCluster &cluster)
+        auto slot_cluster_not_in_use = [](ContextBase::EffectSlotCluster &clusterptr)
         {
-            for(size_t i{0};i < ContextBase::EffectSlotClusterSize;++i)
+            const auto cluster = al::span{*clusterptr};
+            for(size_t i{0};i < cluster.size();++i)
             {
                 if(cluster[i].InUse)
                     return false;
@@ -1642,24 +1654,29 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
         /* Free all wet buffers. Any in use will be reallocated with an updated
          * configuration in aluInitEffectPanning.
          */
-        for(auto&& slots : context->mEffectSlotClusters)
+        for(auto& clusterptr : context->mEffectSlotClusters)
         {
-            for(size_t i{0};i < ContextBase::EffectSlotClusterSize;++i)
+            const auto cluster = al::span{*clusterptr};
+            for(size_t i{0};i < cluster.size();++i)
             {
-                slots[i].mWetBuffer.clear();
-                slots[i].mWetBuffer.shrink_to_fit();
-                slots[i].Wet.Buffer = {};
+                cluster[i].mWetBuffer.clear();
+                cluster[i].mWetBuffer.shrink_to_fit();
+                cluster[i].Wet.Buffer = {};
             }
         }
 
         if(ALeffectslot *slot{context->mDefaultSlot.get()})
         {
-            aluInitEffectPanning(slot->mSlot, context);
+            auto *slotbase = slot->mSlot;
+            aluInitEffectPanning(slotbase, context);
+
+            if(auto *props = slotbase->Update.exchange(nullptr, std::memory_order_relaxed))
+                AtomicReplaceHead(context->mFreeEffectSlotProps, props);
 
             EffectState *state{slot->Effect.State.get()};
             state->mOutTarget = device->Dry.Buffer;
             state->deviceUpdate(device, slot->Buffer);
-            slot->updateProps(context);
+            slot->mPropsDirty = true;
         }
 
         if(EffectSlotArray *curarray{context->mActiveAuxSlots.load(std::memory_order_relaxed)})
@@ -1669,18 +1686,25 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
             uint64_t usemask{~sublist.FreeMask};
             while(usemask)
             {
-                const int idx{al::countr_zero(usemask)};
-                ALeffectslot *slot{sublist.EffectSlots + idx};
+                const auto idx = static_cast<uint>(al::countr_zero(usemask));
+                auto &slot = (*sublist.EffectSlots)[idx];
                 usemask &= ~(1_u64 << idx);
 
-                aluInitEffectPanning(slot->mSlot, context);
+                auto *slotbase = slot.mSlot;
+                aluInitEffectPanning(slotbase, context);
 
-                EffectState *state{slot->Effect.State.get()};
+                if(auto *props = slotbase->Update.exchange(nullptr, std::memory_order_relaxed))
+                    AtomicReplaceHead(context->mFreeEffectSlotProps, props);
+
+                EffectState *state{slot.Effect.State.get()};
                 state->mOutTarget = device->Dry.Buffer;
-                state->deviceUpdate(device, slot->Buffer);
-                slot->updateProps(context);
+                state->deviceUpdate(device, slot.Buffer);
+                slot.mPropsDirty = true;
             }
         }
+        /* Clear all effect slot props to let them get allocated again. */
+        context->mEffectSlotPropClusters.clear();
+        context->mFreeEffectSlotProps.store(nullptr, std::memory_order_relaxed);
         slotlock.unlock();
 
         const uint num_sends{device->NumAuxSends};
@@ -1690,8 +1714,8 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
             uint64_t usemask{~sublist.FreeMask};
             while(usemask)
             {
-                const int idx{al::countr_zero(usemask)};
-                ALsource *source{sublist.Sources + idx};
+                const auto idx = static_cast<uint>(al::countr_zero(usemask));
+                auto &source = (*sublist.Sources)[idx];
                 usemask &= ~(1_u64 << idx);
 
                 auto clear_send = [](ALsource::SendData &send) -> void
@@ -1701,19 +1725,18 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
                     send.Slot = nullptr;
                     send.Gain = 1.0f;
                     send.GainHF = 1.0f;
-                    send.HFReference = LOWPASSFREQREF;
+                    send.HFReference = LowPassFreqRef;
                     send.GainLF = 1.0f;
-                    send.LFReference = HIGHPASSFREQREF;
+                    send.LFReference = HighPassFreqRef;
                 };
-                auto send_begin = source->Send.begin() + static_cast<ptrdiff_t>(num_sends);
-                std::for_each(send_begin, source->Send.end(), clear_send);
+                auto send_begin = source.Send.begin() + static_cast<ptrdiff_t>(num_sends);
+                std::for_each(send_begin, source.Send.end(), clear_send);
 
-                source->mPropsDirty = true;
+                source.mPropsDirty = true;
             }
         }
 
-        auto voicelist = context->getVoicesSpan();
-        for(Voice *voice : voicelist)
+        for(Voice *voice : context->getVoicesSpan())
         {
             /* Clear extraneous property set sends. */
             std::fill(std::begin(voice->mProps.Send)+num_sends, std::end(voice->mProps.Send),
@@ -1745,16 +1768,18 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
 
         context->mPropsDirty = false;
         UpdateContextProps(context);
+        UpdateAllEffectSlotProps(context);
         UpdateAllSourceProps(context);
     }
     mixer_mode.leave();
 
+    device->mDeviceState = DeviceState::Configured;
     if(!device->Flags.test(DevicePaused))
     {
         try {
             auto backend = device->Backend.get();
             backend->start();
-            device->Flags.set(DeviceRunning);
+            device->mDeviceState = DeviceState::Playing;
         }
         catch(al::backend_exception& e) {
             ERR("%s\n", e.what());
@@ -1779,7 +1804,7 @@ bool ResetDeviceParams(ALCdevice *device, const int *attrList)
     if(!device->Connected.load(std::memory_order_relaxed)) UNLIKELY
     {
         /* Make sure disconnection is finished before continuing on. */
-        device->waitForMix();
+        std::ignore = device->waitForMix();
 
         for(ContextBase *ctxbase : *device->mContexts.load(std::memory_order_acquire))
         {
@@ -1790,7 +1815,7 @@ bool ResetDeviceParams(ALCdevice *device, const int *attrList)
             /* Clear any pending voice changes and reallocate voices to get a
              * clean restart.
              */
-            std::lock_guard<std::mutex> __{ctx->mSourceLock};
+            std::lock_guard<std::mutex> sourcelock{ctx->mSourceLock};
             auto *vchg = ctx->mCurrentVoiceChange.load(std::memory_order_acquire);
             while(auto *next = vchg->mNext.load(std::memory_order_acquire))
                 vchg = next;
@@ -1852,7 +1877,7 @@ FORCE_ALIGN void ALC_APIENTRY alsoft_set_log_callback(LPALSOFTLOGCALLBACK callba
 }
 
 /** Returns a new reference to the currently active context for this thread. */
-ContextRef GetContextRef(void)
+ContextRef GetContextRef()
 {
     ALCcontext *context{ALCcontext::getThreadContext()};
     if(context)
@@ -2032,7 +2057,7 @@ ALC_API const ALCchar* ALC_APIENTRY alcGetString(ALCdevice *Device, ALCenum para
             ProbeAllDevicesList();
 
         /* Copy first entry as default. */
-        alcDefaultAllDevicesSpecifier = alcAllDevicesList.c_str();
+        alcDefaultAllDevicesSpecifier = alcAllDevicesList.substr(0, alcAllDevicesList.find('\0'));
         value = alcDefaultAllDevicesSpecifier.c_str();
         break;
 
@@ -2041,7 +2066,8 @@ ALC_API const ALCchar* ALC_APIENTRY alcGetString(ALCdevice *Device, ALCenum para
             ProbeCaptureDeviceList();
 
         /* Copy first entry as default. */
-        alcCaptureDefaultDeviceSpecifier = alcCaptureDeviceList.c_str();
+        alcCaptureDefaultDeviceSpecifier = alcCaptureDeviceList.substr(0,
+            alcCaptureDeviceList.find('\0'));
         value = alcCaptureDefaultDeviceSpecifier.c_str();
         break;
 
@@ -2099,7 +2125,7 @@ static size_t GetIntegerv(ALCdevice *device, ALCenum param, const al::span<int> 
             values[0] = alcEFXMinorVersion;
             return 1;
         case ALC_MAX_AUXILIARY_SENDS:
-            values[0] = MAX_SENDS;
+            values[0] = MaxSendCount;
             return 1;
 
         case ALC_ATTRIBUTES_SIZE:
@@ -2506,9 +2532,10 @@ ALC_API void ALC_APIENTRY alcGetInteger64vSOFT(ALCdevice *device, ALCenum pname,
             nanoseconds basecount;
             do {
                 refcount = dev->waitForMix();
-                basecount = dev->ClockBase;
-                samplecount = dev->SamplesDone;
-            } while(refcount != ReadRef(dev->MixCount));
+                basecount = dev->mClockBase.load(std::memory_order_relaxed);
+                samplecount = dev->mSamplesDone.load(std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_acquire);
+            } while(refcount != dev->mMixCount.load(std::memory_order_relaxed));
             basecount += nanoseconds{seconds{samplecount}} / dev->Frequency;
             *values = basecount.count();
         }
@@ -2542,23 +2569,25 @@ ALC_API ALCboolean ALC_APIENTRY alcIsExtensionPresent(ALCdevice *device, const A
 {
     DeviceRef dev{VerifyDevice(device)};
     if(!extName)
-        alcSetError(dev.get(), ALC_INVALID_VALUE);
-    else
     {
-        size_t len = strlen(extName);
-        const char *ptr = (dev ? alcExtensionList : alcNoDeviceExtList);
-        while(ptr && *ptr)
-        {
-            if(al::strncasecmp(ptr, extName, len) == 0 && (ptr[len] == '\0' || isspace(ptr[len])))
-                return ALC_TRUE;
+        alcSetError(dev.get(), ALC_INVALID_VALUE);
+        return ALC_FALSE;
+    }
 
-            if((ptr=strchr(ptr, ' ')) != nullptr)
-            {
-                do {
-                    ++ptr;
-                } while(isspace(*ptr));
-            }
-        }
+    const std::string_view tofind{extName};
+    auto extlist = dev ? std::string_view{alcExtensionList} : std::string_view{alcNoDeviceExtList};
+    while(!extlist.empty())
+    {
+        auto nextpos = extlist.find(' ');
+        auto tocheck = extlist.substr(0, nextpos);
+        if(tocheck.size() == tofind.size()
+            && al::strncasecmp(tofind.data(), tocheck.data(), tofind.size()) == 0)
+            return ALC_TRUE;
+
+        if(nextpos == std::string_view::npos)
+            break;
+
+        extlist.remove_prefix(nextpos+1);
     }
     return ALC_FALSE;
 }
@@ -2680,7 +2709,7 @@ ALC_API ALCcontext* ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCin
     }
     context->init();
 
-    if(auto volopt = dev->configValue<float>(nullptr, "volume-adjust"))
+    if(auto volopt = dev->configValue<float>({}, "volume-adjust"))
     {
         const float valf{*volopt};
         if(!std::isfinite(valf))
@@ -2702,8 +2731,7 @@ ALC_API ALCcontext* ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCin
          * old array.
          */
         auto *oldarray = device->mContexts.load();
-        const size_t newcount{oldarray->size()+1};
-        std::unique_ptr<ContextArray> newarray{ContextArray::Create(newcount)};
+        auto newarray = ContextArray::Create(oldarray->size() + 1);
 
         /* Copy the current/old context handles to the new array, appending the
          * new context.
@@ -2714,12 +2742,8 @@ ALC_API ALCcontext* ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCin
         /* Store the new context array in the device. Wait for any current mix
          * to finish before deleting the old array.
          */
-        dev->mContexts.store(newarray.release());
-        if(oldarray != &DeviceBase::sEmptyContextArray)
-        {
-            dev->waitForMix();
-            delete oldarray;
-        }
+        auto prevarray = dev->mContexts.exchange(std::move(newarray));
+        std::ignore = dev->waitForMix();
     }
     statelock.unlock();
 
@@ -2763,15 +2787,11 @@ ALC_API void ALC_APIENTRY alcDestroyContext(ALCcontext *context) noexcept
     ALCdevice *Device{ctx->mALDevice.get()};
 
     std::lock_guard<std::mutex> _{Device->StateLock};
-    if(!ctx->deinit() && Device->Flags.test(DeviceRunning))
-    {
-        Device->Backend->stop();
-        Device->Flags.reset(DeviceRunning);
-    }
+    ctx->deinit();
 }
 
 
-ALC_API ALCcontext* ALC_APIENTRY alcGetCurrentContext(void) noexcept
+ALC_API auto ALC_APIENTRY alcGetCurrentContext() noexcept -> ALCcontext*
 {
     ALCcontext *Context{ALCcontext::getThreadContext()};
     if(!Context) Context = ALCcontext::sGlobalContext.load();
@@ -2779,7 +2799,7 @@ ALC_API ALCcontext* ALC_APIENTRY alcGetCurrentContext(void) noexcept
 }
 
 /** Returns the currently active thread-local context. */
-ALC_API ALCcontext* ALC_APIENTRY alcGetThreadContext(void) noexcept
+ALC_API auto ALC_APIENTRY alcGetThreadContext() noexcept -> ALCcontext*
 { return ALCcontext::getThreadContext(); }
 
 ALC_API ALCboolean ALC_APIENTRY alcMakeContextCurrent(ALCcontext *context) noexcept
@@ -2804,7 +2824,7 @@ ALC_API ALCboolean ALC_APIENTRY alcMakeContextCurrent(ALCcontext *context) noexc
          * the current context as its refcount is decremented.
          */
     }
-    ContextRef{ALCcontext::sGlobalContext.exchange(ctx.release())};
+    ctx = ContextRef{ALCcontext::sGlobalContext.exchange(ctx.release())};
     ALCcontext::sGlobalContextLock.store(false, std::memory_order_release);
 
     /* Take ownership of the thread-local context reference (if any), clearing
@@ -2889,17 +2909,23 @@ ALC_API ALCdevice* ALC_APIENTRY alcOpenDevice(const ALCchar *deviceName) noexcep
 #ifdef ALSOFT_EAX
         eax_g_is_enabled ? uint{EAX_MAX_FXSLOTS} :
 #endif // ALSOFT_EAX
-        DEFAULT_SENDS
+        uint{DefaultSendCount}
     };
 
-    DeviceRef device{new ALCdevice{DeviceType::Playback}};
+    DeviceRef device{new(std::nothrow) ALCdevice{DeviceType::Playback}};
+    if(!device)
+    {
+        WARN("Failed to create playback device handle\n");
+        alcSetError(nullptr, ALC_OUT_OF_MEMORY);
+        return nullptr;
+    }
 
     /* Set output format */
     device->FmtChans = DevFmtChannelsDefault;
     device->FmtType = DevFmtTypeDefault;
-    device->Frequency = DEFAULT_OUTPUT_RATE;
-    device->UpdateSize = DEFAULT_UPDATE_SIZE;
-    device->BufferSize = DEFAULT_UPDATE_SIZE * DEFAULT_NUM_UPDATES;
+    device->Frequency = DefaultOutputRate;
+    device->UpdateSize = DefaultUpdateSize;
+    device->BufferSize = DefaultUpdateSize * DefaultNumUpdates;
 
     device->SourcesMax = 256;
     device->NumStereoSources = 1;
@@ -2975,7 +3001,7 @@ ALC_API ALCboolean ALC_APIENTRY alcCloseDevice(ALCdevice *device) noexcept
         auto ctxiter = std::lower_bound(ContextList.begin(), ContextList.end(), ctx);
         if(ctxiter != ContextList.end() && *ctxiter == ctx)
         {
-            orphanctxs.emplace_back(ContextRef{*ctxiter});
+            orphanctxs.emplace_back(*ctxiter);
             ContextList.erase(ctxiter);
         }
     }
@@ -2988,9 +3014,11 @@ ALC_API ALCboolean ALC_APIENTRY alcCloseDevice(ALCdevice *device) noexcept
     }
     orphanctxs.clear();
 
-    if(dev->Flags.test(DeviceRunning))
+    if(dev->mDeviceState == DeviceState::Playing)
+    {
         dev->Backend->stop();
-    dev->Flags.reset(DeviceRunning);
+        dev->mDeviceState = DeviceState::Configured;
+    }
 
     return ALC_TRUE;
 }
@@ -3025,7 +3053,13 @@ ALC_API ALCdevice* ALC_APIENTRY alcCaptureOpenDevice(const ALCchar *deviceName, 
     else
         TRACE("Opening default capture device\n");
 
-    DeviceRef device{new ALCdevice{DeviceType::Capture}};
+    DeviceRef device{new(std::nothrow) ALCdevice{DeviceType::Capture}};
+    if(!device)
+    {
+        WARN("Failed to create capture device handle\n");
+        alcSetError(nullptr, ALC_OUT_OF_MEMORY);
+        return nullptr;
+    }
 
     auto decompfmt = DecomposeDevFormat(format);
     if(!decompfmt)
@@ -3072,6 +3106,7 @@ ALC_API ALCdevice* ALC_APIENTRY alcCaptureOpenDevice(const ALCchar *deviceName, 
         auto iter = std::lower_bound(DeviceList.cbegin(), DeviceList.cend(), device.get());
         DeviceList.emplace(iter, device.get());
     }
+    device->mDeviceState = DeviceState::Configured;
 
     TRACE("Created capture device %p, \"%s\"\n", voidp{device.get()}, device->DeviceName.c_str());
     return device.release();
@@ -3097,9 +3132,11 @@ ALC_API ALCboolean ALC_APIENTRY alcCaptureCloseDevice(ALCdevice *device) noexcep
     listlock.unlock();
 
     std::lock_guard<std::mutex> _{dev->StateLock};
-    if(dev->Flags.test(DeviceRunning))
+    if(dev->mDeviceState == DeviceState::Playing)
+    {
         dev->Backend->stop();
-    dev->Flags.reset(DeviceRunning);
+        dev->mDeviceState = DeviceState::Configured;
+    }
 
     return ALC_TRUE;
 }
@@ -3114,14 +3151,15 @@ ALC_API void ALC_APIENTRY alcCaptureStart(ALCdevice *device) noexcept
     }
 
     std::lock_guard<std::mutex> _{dev->StateLock};
-    if(!dev->Connected.load(std::memory_order_acquire))
+    if(!dev->Connected.load(std::memory_order_acquire)
+        || dev->mDeviceState < DeviceState::Configured)
         alcSetError(dev.get(), ALC_INVALID_DEVICE);
-    else if(!dev->Flags.test(DeviceRunning))
+    else if(dev->mDeviceState != DeviceState::Playing)
     {
         try {
             auto backend = dev->Backend.get();
             backend->start();
-            dev->Flags.set(DeviceRunning);
+            dev->mDeviceState = DeviceState::Playing;
         }
         catch(al::backend_exception& e) {
             ERR("%s\n", e.what());
@@ -3139,9 +3177,11 @@ ALC_API void ALC_APIENTRY alcCaptureStop(ALCdevice *device) noexcept
     else
     {
         std::lock_guard<std::mutex> _{dev->StateLock};
-        if(dev->Flags.test(DeviceRunning))
+        if(dev->mDeviceState == DeviceState::Playing)
+        {
             dev->Backend->stop();
-        dev->Flags.reset(DeviceRunning);
+            dev->mDeviceState = DeviceState::Configured;
+        }
     }
 }
 
@@ -3196,10 +3236,16 @@ ALC_API ALCdevice* ALC_APIENTRY alcLoopbackOpenDeviceSOFT(const ALCchar *deviceN
 #ifdef ALSOFT_EAX
         eax_g_is_enabled ? uint{EAX_MAX_FXSLOTS} :
 #endif // ALSOFT_EAX
-        DEFAULT_SENDS
+        uint{DefaultSendCount}
     };
 
-    DeviceRef device{new ALCdevice{DeviceType::Loopback}};
+    DeviceRef device{new(std::nothrow) ALCdevice{DeviceType::Loopback}};
+    if(!device)
+    {
+        WARN("Failed to create loopback device handle\n");
+        alcSetError(nullptr, ALC_OUT_OF_MEMORY);
+        return nullptr;
+    }
 
     device->SourcesMax = 256;
     device->AuxiliaryEffectSlotMax = 64;
@@ -3209,7 +3255,7 @@ ALC_API ALCdevice* ALC_APIENTRY alcLoopbackOpenDeviceSOFT(const ALCchar *deviceN
     device->BufferSize = 0;
     device->UpdateSize = 0;
 
-    device->Frequency = DEFAULT_OUTPUT_RATE;
+    device->Frequency = DefaultOutputRate;
     device->FmtChans = DevFmtChannelsDefault;
     device->FmtType = DevFmtTypeDefault;
 
@@ -3252,7 +3298,7 @@ ALC_API ALCboolean ALC_APIENTRY alcIsRenderFormatSupportedSOFT(ALCdevice *device
     else
     {
         if(DevFmtTypeFromEnum(type).has_value() && DevFmtChannelsFromEnum(channels).has_value()
-            && freq >= MIN_OUTPUT_RATE && freq <= MAX_OUTPUT_RATE)
+            && freq >= int{MinOutputRate} && freq <= int{MaxOutputRate})
             return ALC_TRUE;
     }
 
@@ -3293,9 +3339,11 @@ ALC_API void ALC_APIENTRY alcDevicePauseSOFT(ALCdevice *device) noexcept
     else
     {
         std::lock_guard<std::mutex> _{dev->StateLock};
-        if(dev->Flags.test(DeviceRunning))
+        if(dev->mDeviceState == DeviceState::Playing)
+        {
             dev->Backend->stop();
-        dev->Flags.reset(DeviceRunning);
+            dev->mDeviceState = DeviceState::Configured;
+        }
         dev->Flags.set(DevicePaused);
     }
 }
@@ -3313,6 +3361,18 @@ ALC_API void ALC_APIENTRY alcDeviceResumeSOFT(ALCdevice *device) noexcept
     std::lock_guard<std::mutex> _{dev->StateLock};
     if(!dev->Flags.test(DevicePaused))
         return;
+    if(dev->mDeviceState < DeviceState::Configured)
+    {
+        WARN("Cannot resume unconfigured device\n");
+        alcSetError(dev.get(), ALC_INVALID_DEVICE);
+        return;
+    }
+    if(!dev->Connected.load())
+    {
+        WARN("Cannot resume a disconnected device\n");
+        alcSetError(dev.get(), ALC_INVALID_DEVICE);
+        return;
+    }
     dev->Flags.reset(DevicePaused);
     if(dev->mContexts.load()->empty())
         return;
@@ -3320,7 +3380,7 @@ ALC_API void ALC_APIENTRY alcDeviceResumeSOFT(ALCdevice *device) noexcept
     try {
         auto backend = dev->Backend.get();
         backend->start();
-        dev->Flags.set(DeviceRunning);
+        dev->mDeviceState = DeviceState::Playing;
     }
     catch(al::backend_exception& e) {
         ERR("%s\n", e.what());
@@ -3329,8 +3389,8 @@ ALC_API void ALC_APIENTRY alcDeviceResumeSOFT(ALCdevice *device) noexcept
         return;
     }
     TRACE("Post-resume: %s, %s, %uhz, %u / %u buffer\n",
-        DevFmtChannelsString(device->FmtChans), DevFmtTypeString(device->FmtType),
-        device->Frequency, device->UpdateSize, device->BufferSize);
+        DevFmtChannelsString(dev->FmtChans), DevFmtTypeString(dev->FmtType),
+        dev->Frequency, dev->UpdateSize, dev->BufferSize);
 }
 
 
@@ -3377,9 +3437,11 @@ ALC_API ALCboolean ALC_APIENTRY alcResetDeviceSOFT(ALCdevice *device, const ALCi
     /* Force the backend to stop mixing first since we're resetting. Also reset
      * the connected state so lost devices can attempt recover.
      */
-    if(dev->Flags.test(DeviceRunning))
+    if(dev->mDeviceState == DeviceState::Playing)
+    {
         dev->Backend->stop();
-    dev->Flags.reset(DeviceRunning);
+        dev->mDeviceState = DeviceState::Configured;
+    }
 
     return ResetDeviceParams(dev.get(), attribs) ? ALC_TRUE : ALC_FALSE;
 }
@@ -3409,12 +3471,12 @@ FORCE_ALIGN ALCboolean ALC_APIENTRY alcReopenDeviceSOFT(ALCdevice *device,
     }
     std::lock_guard<std::mutex> _{dev->StateLock};
 
-    /* Force the backend to stop mixing first since we're reopening. */
-    if(dev->Flags.test(DeviceRunning))
+    /* Force the backend device to stop first since we're opening another one. */
+    const bool wasPlaying{dev->mDeviceState == DeviceState::Playing};
+    if(wasPlaying)
     {
-        auto backend = dev->Backend.get();
-        backend->stop();
-        dev->Flags.reset(DeviceRunning);
+        dev->Backend->stop();
+        dev->mDeviceState = DeviceState::Configured;
     }
 
     BackendPtr newbackend;
@@ -3436,16 +3498,12 @@ FORCE_ALIGN ALCboolean ALC_APIENTRY alcReopenDeviceSOFT(ALCdevice *device,
         alcSetError(dev.get(), (e.errorCode() == al::backend_error::OutOfMemory)
             ? ALC_OUT_OF_MEMORY : ALC_INVALID_VALUE);
 
-        /* If the device is connected, not paused, and has contexts, ensure it
-         * continues playing.
-         */
-        if(dev->Connected.load(std::memory_order_relaxed) && !dev->Flags.test(DevicePaused)
-            && !dev->mContexts.load(std::memory_order_relaxed)->empty())
+        if(dev->Connected.load(std::memory_order_relaxed) && wasPlaying)
         {
             try {
                 auto backend = dev->Backend.get();
                 backend->start();
-                dev->Flags.set(DeviceRunning);
+                dev->mDeviceState = DeviceState::Playing;
             }
             catch(al::backend_exception &be) {
                 ERR("%s\n", be.what());
@@ -3456,6 +3514,7 @@ FORCE_ALIGN ALCboolean ALC_APIENTRY alcReopenDeviceSOFT(ALCdevice *device,
     }
     listlock.unlock();
     dev->Backend = std::move(newbackend);
+    dev->mDeviceState = DeviceState::Unprepared;
     TRACE("Reopened device %p, \"%s\"\n", voidp{dev.get()}, dev->DeviceName.c_str());
 
     /* Always return true even if resetting fails. It shouldn't fail, but this
@@ -3471,4 +3530,38 @@ FORCE_ALIGN ALCboolean ALC_APIENTRY alcReopenDeviceSOFT(ALCdevice *device,
      */
     ResetDeviceParams(dev.get(), attribs);
     return ALC_TRUE;
+}
+
+/************************************************
+ * ALC event query functions
+ ************************************************/
+
+FORCE_ALIGN ALCenum ALC_APIENTRY alcEventIsSupportedSOFT(ALCenum eventType, ALCenum deviceType) noexcept
+{
+    auto etype = alc::GetEventType(eventType);
+    if(!etype)
+    {
+        WARN("Invalid event type: 0x%04x\n", eventType);
+        alcSetError(nullptr, ALC_INVALID_ENUM);
+        return ALC_EVENT_NOT_SUPPORTED_SOFT;
+    }
+
+    auto supported = alc::EventSupport::NoSupport;
+    switch(deviceType)
+    {
+        case ALC_PLAYBACK_DEVICE_SOFT:
+            if(PlaybackFactory)
+                supported = PlaybackFactory->queryEventSupport(*etype, BackendType::Playback);
+            break;
+
+        case ALC_CAPTURE_DEVICE_SOFT:
+            if(CaptureFactory)
+                supported = CaptureFactory->queryEventSupport(*etype, BackendType::Capture);
+            break;
+
+        default:
+            WARN("Invalid device type: 0x%04x\n", deviceType);
+            alcSetError(nullptr, ALC_INVALID_ENUM);
+    }
+    return al::to_underlying(supported);
 }

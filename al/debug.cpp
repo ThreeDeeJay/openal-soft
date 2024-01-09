@@ -4,10 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <mutex>
 #include <optional>
-#include <stddef.h>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -26,6 +26,11 @@
 #include "opthelpers.h"
 #include "source.h"
 
+
+/* Declared here to prevent compilers from thinking it should be inlined, which
+ * GCC warns about increasing code size.
+ */
+DebugGroup::~DebugGroup() = default;
 
 namespace {
 

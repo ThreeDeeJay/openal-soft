@@ -45,21 +45,20 @@ uint BackendBase::availableSamples()
 
 ClockLatency BackendBase::getClockLatency()
 {
-    ClockLatency ret;
+    ClockLatency ret{};
 
     uint refcount;
     do {
         refcount = mDevice->waitForMix();
-        ret.ClockTime = GetDeviceClockTime(mDevice);
+        ret.ClockTime = mDevice->getClockTime();
         std::atomic_thread_fence(std::memory_order_acquire);
-    } while(refcount != ReadRef(mDevice->MixCount));
+    } while(refcount != mDevice->mMixCount.load(std::memory_order_relaxed));
 
     /* NOTE: The device will generally have about all but one periods filled at
      * any given time during playback. Without a more accurate measurement from
      * the output, this is an okay approximation.
      */
-    ret.Latency = std::max(std::chrono::seconds{mDevice->BufferSize-mDevice->UpdateSize},
-        std::chrono::seconds::zero());
+    ret.Latency = std::chrono::seconds{mDevice->BufferSize - mDevice->UpdateSize};
     ret.Latency /= mDevice->Frequency;
 
     return ret;

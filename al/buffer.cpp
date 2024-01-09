@@ -68,6 +68,8 @@
 
 namespace {
 
+using SubListAllocator = typename al::allocator<std::array<ALbuffer,64>>;
+
 std::optional<AmbiLayout> AmbiLayoutFromEnum(ALenum layout)
 {
     switch(layout)
@@ -178,21 +180,21 @@ bool EnsureBuffers(ALCdevice *device, size_t needed)
         [](size_t cur, const BufferSubList &sublist) noexcept -> size_t
         { return cur + static_cast<ALuint>(al::popcount(sublist.FreeMask)); })};
 
-    while(needed > count)
-    {
-        if(device->BufferList.size() >= 1<<25) UNLIKELY
-            return false;
-
-        device->BufferList.emplace_back();
-        auto sublist = device->BufferList.end() - 1;
-        sublist->FreeMask = ~0_u64;
-        sublist->Buffers = static_cast<ALbuffer*>(al_calloc(alignof(ALbuffer), sizeof(ALbuffer)*64));
-        if(!sublist->Buffers) UNLIKELY
+    try {
+        while(needed > count)
         {
-            device->BufferList.pop_back();
-            return false;
+            if(device->BufferList.size() >= 1<<25) UNLIKELY
+                return false;
+
+            BufferSubList sublist{};
+            sublist.FreeMask = ~0_u64;
+            sublist.Buffers = SubListAllocator{}.allocate(1);
+            device->BufferList.emplace_back(std::move(sublist));
+            count += 64;
         }
-        count += 64;
+    }
+    catch(...) {
+        return false;
     }
     return true;
 }
@@ -206,7 +208,7 @@ ALbuffer *AllocBuffer(ALCdevice *device)
     auto slidx = static_cast<ALuint>(al::countr_zero(sublist->FreeMask));
     ASSUME(slidx < 64);
 
-    ALbuffer *buffer{al::construct_at(sublist->Buffers + slidx)};
+    ALbuffer *buffer{al::construct_at(al::to_address(sublist->Buffers->begin() + slidx))};
 
     /* Add 1 to avoid buffer ID 0. */
     buffer->id = ((lidx<<6) | slidx) + 1;
@@ -243,7 +245,7 @@ inline ALbuffer *LookupBuffer(ALCdevice *device, ALuint id)
     BufferSubList &sublist = device->BufferList[lidx];
     if(sublist.FreeMask & (1_u64 << slidx)) UNLIKELY
         return nullptr;
-    return sublist.Buffers + slidx;
+    return al::to_address(sublist.Buffers->begin() + slidx);
 }
 
 
@@ -286,7 +288,7 @@ void LoadData(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq, ALuint size,
     const FmtChannels DstChannels, const FmtType DstType, const std::byte *SrcData,
     ALbitfieldSOFT access)
 {
-    if(ReadRef(ALBuf->ref) != 0 || ALBuf->MappedAccess != 0) UNLIKELY
+    if(ALBuf->ref.load(std::memory_order_relaxed) != 0 || ALBuf->MappedAccess != 0) UNLIKELY
         return context->setError(AL_INVALID_OPERATION, "Modifying storage for in-use buffer %u",
             ALBuf->id);
 
@@ -393,7 +395,7 @@ void PrepareCallback(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq,
     const FmtChannels DstChannels, const FmtType DstType, ALBUFFERCALLBACKTYPESOFT callback,
     void *userptr)
 {
-    if(ReadRef(ALBuf->ref) != 0 || ALBuf->MappedAccess != 0) UNLIKELY
+    if(ALBuf->ref.load(std::memory_order_relaxed) != 0 || ALBuf->MappedAccess != 0) UNLIKELY
         return context->setError(AL_INVALID_OPERATION, "Modifying callback for in-use buffer %u",
             ALBuf->id);
 
@@ -402,6 +404,10 @@ void PrepareCallback(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq,
 
     const ALuint unpackalign{ALBuf->UnpackAlign};
     const ALuint align{SanitizeAlignment(DstType, unpackalign)};
+    if(align < 1) UNLIKELY
+        return context->setError(AL_INVALID_VALUE, "Invalid unpack alignment %u for %s samples",
+            unpackalign, NameFromFormat(DstType));
+
     const ALuint BlockSize{ChannelsFromFmt(DstChannels, ambiorder) *
         ((DstType == FmtIMA4) ? (align-1)/2 + 4 :
         (DstType == FmtMSADPCM) ? (align-2)/2 + 7 :
@@ -445,7 +451,7 @@ void PrepareCallback(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq,
 void PrepareUserPtr(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq,
     const FmtChannels DstChannels, const FmtType DstType, std::byte *sdata, const ALuint sdatalen)
 {
-    if(ReadRef(ALBuf->ref) != 0 || ALBuf->MappedAccess != 0) UNLIKELY
+    if(ALBuf->ref.load(std::memory_order_relaxed) != 0 || ALBuf->MappedAccess != 0) UNLIKELY
         return context->setError(AL_INVALID_OPERATION, "Modifying storage for in-use buffer %u",
             ALBuf->id);
 
@@ -464,6 +470,7 @@ void PrepareUserPtr(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq,
         {
         case FmtUByte: return alignof(ALubyte);
         case FmtShort: return alignof(ALshort);
+        case FmtInt: return alignof(ALint);
         case FmtFloat: return alignof(ALfloat);
         case FmtDouble: return alignof(ALdouble);
         case FmtMulaw: return alignof(ALubyte);
@@ -549,83 +556,98 @@ std::optional<DecompResult> DecomposeUserFormat(ALenum format)
         FmtChannels channels;
         FmtType type;
     };
-    static const std::array<FormatMap,63> UserFmtList{{
-        { AL_FORMAT_MONO8,             FmtMono, FmtUByte   },
-        { AL_FORMAT_MONO16,            FmtMono, FmtShort   },
-        { AL_FORMAT_MONO_FLOAT32,      FmtMono, FmtFloat   },
-        { AL_FORMAT_MONO_DOUBLE_EXT,   FmtMono, FmtDouble  },
-        { AL_FORMAT_MONO_IMA4,         FmtMono, FmtIMA4    },
-        { AL_FORMAT_MONO_MSADPCM_SOFT, FmtMono, FmtMSADPCM },
-        { AL_FORMAT_MONO_MULAW,        FmtMono, FmtMulaw   },
-        { AL_FORMAT_MONO_ALAW_EXT,     FmtMono, FmtAlaw    },
+    static constexpr std::array UserFmtList{
+        FormatMap{AL_FORMAT_MONO8,             FmtMono, FmtUByte  },
+        FormatMap{AL_FORMAT_MONO16,            FmtMono, FmtShort  },
+        FormatMap{AL_FORMAT_MONO_I32,          FmtMono, FmtInt    },
+        FormatMap{AL_FORMAT_MONO_FLOAT32,      FmtMono, FmtFloat  },
+        FormatMap{AL_FORMAT_MONO_DOUBLE_EXT,   FmtMono, FmtDouble },
+        FormatMap{AL_FORMAT_MONO_IMA4,         FmtMono, FmtIMA4   },
+        FormatMap{AL_FORMAT_MONO_MSADPCM_SOFT, FmtMono, FmtMSADPCM},
+        FormatMap{AL_FORMAT_MONO_MULAW,        FmtMono, FmtMulaw  },
+        FormatMap{AL_FORMAT_MONO_ALAW_EXT,     FmtMono, FmtAlaw   },
 
-        { AL_FORMAT_STEREO8,             FmtStereo, FmtUByte   },
-        { AL_FORMAT_STEREO16,            FmtStereo, FmtShort   },
-        { AL_FORMAT_STEREO_FLOAT32,      FmtStereo, FmtFloat   },
-        { AL_FORMAT_STEREO_DOUBLE_EXT,   FmtStereo, FmtDouble  },
-        { AL_FORMAT_STEREO_IMA4,         FmtStereo, FmtIMA4    },
-        { AL_FORMAT_STEREO_MSADPCM_SOFT, FmtStereo, FmtMSADPCM },
-        { AL_FORMAT_STEREO_MULAW,        FmtStereo, FmtMulaw   },
-        { AL_FORMAT_STEREO_ALAW_EXT,     FmtStereo, FmtAlaw    },
+        FormatMap{AL_FORMAT_STEREO8,             FmtStereo, FmtUByte  },
+        FormatMap{AL_FORMAT_STEREO16,            FmtStereo, FmtShort  },
+        FormatMap{AL_FORMAT_STEREO_I32,          FmtStereo, FmtInt    },
+        FormatMap{AL_FORMAT_STEREO_FLOAT32,      FmtStereo, FmtFloat  },
+        FormatMap{AL_FORMAT_STEREO_DOUBLE_EXT,   FmtStereo, FmtDouble },
+        FormatMap{AL_FORMAT_STEREO_IMA4,         FmtStereo, FmtIMA4   },
+        FormatMap{AL_FORMAT_STEREO_MSADPCM_SOFT, FmtStereo, FmtMSADPCM},
+        FormatMap{AL_FORMAT_STEREO_MULAW,        FmtStereo, FmtMulaw  },
+        FormatMap{AL_FORMAT_STEREO_ALAW_EXT,     FmtStereo, FmtAlaw   },
 
-        { AL_FORMAT_REAR8,      FmtRear, FmtUByte },
-        { AL_FORMAT_REAR16,     FmtRear, FmtShort },
-        { AL_FORMAT_REAR32,     FmtRear, FmtFloat },
-        { AL_FORMAT_REAR_MULAW, FmtRear, FmtMulaw },
+        FormatMap{AL_FORMAT_REAR8,        FmtRear, FmtUByte},
+        FormatMap{AL_FORMAT_REAR16,       FmtRear, FmtShort},
+        FormatMap{AL_FORMAT_REAR32,       FmtRear, FmtFloat},
+        FormatMap{AL_FORMAT_REAR_I32,     FmtRear, FmtInt  },
+        FormatMap{AL_FORMAT_REAR_FLOAT32, FmtRear, FmtFloat},
+        FormatMap{AL_FORMAT_REAR_MULAW,   FmtRear, FmtMulaw},
 
-        { AL_FORMAT_QUAD8_LOKI,  FmtQuad, FmtUByte },
-        { AL_FORMAT_QUAD16_LOKI, FmtQuad, FmtShort },
+        FormatMap{AL_FORMAT_QUAD8_LOKI,  FmtQuad, FmtUByte},
+        FormatMap{AL_FORMAT_QUAD16_LOKI, FmtQuad, FmtShort},
 
-        { AL_FORMAT_QUAD8,      FmtQuad, FmtUByte },
-        { AL_FORMAT_QUAD16,     FmtQuad, FmtShort },
-        { AL_FORMAT_QUAD32,     FmtQuad, FmtFloat },
-        { AL_FORMAT_QUAD_MULAW, FmtQuad, FmtMulaw },
+        FormatMap{AL_FORMAT_QUAD8,        FmtQuad, FmtUByte},
+        FormatMap{AL_FORMAT_QUAD16,       FmtQuad, FmtShort},
+        FormatMap{AL_FORMAT_QUAD32,       FmtQuad, FmtFloat},
+        FormatMap{AL_FORMAT_QUAD_I32,     FmtQuad, FmtInt  },
+        FormatMap{AL_FORMAT_QUAD_FLOAT32, FmtQuad, FmtFloat},
+        FormatMap{AL_FORMAT_QUAD_MULAW,   FmtQuad, FmtMulaw},
 
-        { AL_FORMAT_51CHN8,      FmtX51, FmtUByte },
-        { AL_FORMAT_51CHN16,     FmtX51, FmtShort },
-        { AL_FORMAT_51CHN32,     FmtX51, FmtFloat },
-        { AL_FORMAT_51CHN_MULAW, FmtX51, FmtMulaw },
+        FormatMap{AL_FORMAT_51CHN8,        FmtX51, FmtUByte},
+        FormatMap{AL_FORMAT_51CHN16,       FmtX51, FmtShort},
+        FormatMap{AL_FORMAT_51CHN32,       FmtX51, FmtFloat},
+        FormatMap{AL_FORMAT_51CHN_I32,     FmtX51, FmtInt  },
+        FormatMap{AL_FORMAT_51CHN_FLOAT32, FmtX51, FmtFloat},
+        FormatMap{AL_FORMAT_51CHN_MULAW,   FmtX51, FmtMulaw},
 
-        { AL_FORMAT_61CHN8,      FmtX61, FmtUByte },
-        { AL_FORMAT_61CHN16,     FmtX61, FmtShort },
-        { AL_FORMAT_61CHN32,     FmtX61, FmtFloat },
-        { AL_FORMAT_61CHN_MULAW, FmtX61, FmtMulaw },
+        FormatMap{AL_FORMAT_61CHN8,        FmtX61, FmtUByte},
+        FormatMap{AL_FORMAT_61CHN16,       FmtX61, FmtShort},
+        FormatMap{AL_FORMAT_61CHN32,       FmtX61, FmtFloat},
+        FormatMap{AL_FORMAT_61CHN_I32,     FmtX61, FmtInt  },
+        FormatMap{AL_FORMAT_61CHN_FLOAT32, FmtX61, FmtFloat},
+        FormatMap{AL_FORMAT_61CHN_MULAW,   FmtX61, FmtMulaw},
 
-        { AL_FORMAT_71CHN8,      FmtX71, FmtUByte },
-        { AL_FORMAT_71CHN16,     FmtX71, FmtShort },
-        { AL_FORMAT_71CHN32,     FmtX71, FmtFloat },
-        { AL_FORMAT_71CHN_MULAW, FmtX71, FmtMulaw },
+        FormatMap{AL_FORMAT_71CHN8,        FmtX71, FmtUByte},
+        FormatMap{AL_FORMAT_71CHN16,       FmtX71, FmtShort},
+        FormatMap{AL_FORMAT_71CHN32,       FmtX71, FmtFloat},
+        FormatMap{AL_FORMAT_71CHN_I32,     FmtX71, FmtInt  },
+        FormatMap{AL_FORMAT_71CHN_FLOAT32, FmtX71, FmtFloat},
+        FormatMap{AL_FORMAT_71CHN_MULAW,   FmtX71, FmtMulaw},
 
-        { AL_FORMAT_BFORMAT2D_8,       FmtBFormat2D, FmtUByte },
-        { AL_FORMAT_BFORMAT2D_16,      FmtBFormat2D, FmtShort },
-        { AL_FORMAT_BFORMAT2D_FLOAT32, FmtBFormat2D, FmtFloat },
-        { AL_FORMAT_BFORMAT2D_MULAW,   FmtBFormat2D, FmtMulaw },
+        FormatMap{AL_FORMAT_BFORMAT2D_8,       FmtBFormat2D, FmtUByte},
+        FormatMap{AL_FORMAT_BFORMAT2D_16,      FmtBFormat2D, FmtShort},
+        FormatMap{AL_FORMAT_BFORMAT2D_FLOAT32, FmtBFormat2D, FmtFloat},
+        FormatMap{AL_FORMAT_BFORMAT2D_MULAW,   FmtBFormat2D, FmtMulaw},
 
-        { AL_FORMAT_BFORMAT3D_8,       FmtBFormat3D, FmtUByte },
-        { AL_FORMAT_BFORMAT3D_16,      FmtBFormat3D, FmtShort },
-        { AL_FORMAT_BFORMAT3D_FLOAT32, FmtBFormat3D, FmtFloat },
-        { AL_FORMAT_BFORMAT3D_MULAW,   FmtBFormat3D, FmtMulaw },
+        FormatMap{AL_FORMAT_BFORMAT3D_8,       FmtBFormat3D, FmtUByte},
+        FormatMap{AL_FORMAT_BFORMAT3D_16,      FmtBFormat3D, FmtShort},
+        FormatMap{AL_FORMAT_BFORMAT3D_FLOAT32, FmtBFormat3D, FmtFloat},
+        FormatMap{AL_FORMAT_BFORMAT3D_MULAW,   FmtBFormat3D, FmtMulaw},
 
-        { AL_FORMAT_UHJ2CHN8_SOFT,        FmtUHJ2, FmtUByte   },
-        { AL_FORMAT_UHJ2CHN16_SOFT,       FmtUHJ2, FmtShort   },
-        { AL_FORMAT_UHJ2CHN_FLOAT32_SOFT, FmtUHJ2, FmtFloat   },
-        { AL_FORMAT_UHJ2CHN_MULAW_SOFT,   FmtUHJ2, FmtMulaw   },
-        { AL_FORMAT_UHJ2CHN_ALAW_SOFT,    FmtUHJ2, FmtAlaw    },
-        { AL_FORMAT_UHJ2CHN_IMA4_SOFT,    FmtUHJ2, FmtIMA4    },
-        { AL_FORMAT_UHJ2CHN_MSADPCM_SOFT, FmtUHJ2, FmtMSADPCM },
+        FormatMap{AL_FORMAT_UHJ2CHN8_SOFT,        FmtUHJ2, FmtUByte  },
+        FormatMap{AL_FORMAT_UHJ2CHN16_SOFT,       FmtUHJ2, FmtShort  },
+        FormatMap{AL_FORMAT_UHJ2CHN_I32,          FmtUHJ2, FmtInt    },
+        FormatMap{AL_FORMAT_UHJ2CHN_FLOAT32_SOFT, FmtUHJ2, FmtFloat  },
+        FormatMap{AL_FORMAT_UHJ2CHN_MULAW_SOFT,   FmtUHJ2, FmtMulaw  },
+        FormatMap{AL_FORMAT_UHJ2CHN_ALAW_SOFT,    FmtUHJ2, FmtAlaw   },
+        FormatMap{AL_FORMAT_UHJ2CHN_IMA4_SOFT,    FmtUHJ2, FmtIMA4   },
+        FormatMap{AL_FORMAT_UHJ2CHN_MSADPCM_SOFT, FmtUHJ2, FmtMSADPCM},
 
-        { AL_FORMAT_UHJ3CHN8_SOFT,        FmtUHJ3, FmtUByte },
-        { AL_FORMAT_UHJ3CHN16_SOFT,       FmtUHJ3, FmtShort },
-        { AL_FORMAT_UHJ3CHN_FLOAT32_SOFT, FmtUHJ3, FmtFloat },
-        { AL_FORMAT_UHJ3CHN_MULAW_SOFT,   FmtUHJ3, FmtMulaw },
-        { AL_FORMAT_UHJ3CHN_ALAW_SOFT,    FmtUHJ3, FmtAlaw  },
+        FormatMap{AL_FORMAT_UHJ3CHN8_SOFT,        FmtUHJ3, FmtUByte},
+        FormatMap{AL_FORMAT_UHJ3CHN16_SOFT,       FmtUHJ3, FmtShort},
+        FormatMap{AL_FORMAT_UHJ3CHN_I32,          FmtUHJ3, FmtInt  },
+        FormatMap{AL_FORMAT_UHJ3CHN_FLOAT32_SOFT, FmtUHJ3, FmtFloat},
+        FormatMap{AL_FORMAT_UHJ3CHN_MULAW_SOFT,   FmtUHJ3, FmtMulaw},
+        FormatMap{AL_FORMAT_UHJ3CHN_ALAW_SOFT,    FmtUHJ3, FmtAlaw },
 
-        { AL_FORMAT_UHJ4CHN8_SOFT,        FmtUHJ4, FmtUByte },
-        { AL_FORMAT_UHJ4CHN16_SOFT,       FmtUHJ4, FmtShort },
-        { AL_FORMAT_UHJ4CHN_FLOAT32_SOFT, FmtUHJ4, FmtFloat },
-        { AL_FORMAT_UHJ4CHN_MULAW_SOFT,   FmtUHJ4, FmtMulaw },
-        { AL_FORMAT_UHJ4CHN_ALAW_SOFT,    FmtUHJ4, FmtAlaw  },
-    }};
+        FormatMap{AL_FORMAT_UHJ4CHN8_SOFT,        FmtUHJ4, FmtUByte},
+        FormatMap{AL_FORMAT_UHJ4CHN16_SOFT,       FmtUHJ4, FmtShort},
+        FormatMap{AL_FORMAT_UHJ4CHN_I32,          FmtUHJ4, FmtInt  },
+        FormatMap{AL_FORMAT_UHJ4CHN_FLOAT32_SOFT, FmtUHJ4, FmtFloat},
+        FormatMap{AL_FORMAT_UHJ4CHN_MULAW_SOFT,   FmtUHJ4, FmtMulaw},
+        FormatMap{AL_FORMAT_UHJ4CHN_ALAW_SOFT,    FmtUHJ4, FmtAlaw },
+    };
 
     for(const auto &fmt : UserFmtList)
     {
@@ -695,7 +717,7 @@ FORCE_ALIGN void AL_APIENTRY alDeleteBuffersDirect(ALCcontext *context, ALsizei 
             context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", bid);
             return false;
         }
-        if(ReadRef(ALBuf->ref) != 0) UNLIKELY
+        if(ALBuf->ref.load(std::memory_order_relaxed) != 0) UNLIKELY
         {
             context->setError(AL_INVALID_OPERATION, "Deleting in-use buffer %u", bid);
             return false;
@@ -810,7 +832,8 @@ FORCE_ALIGN void* AL_APIENTRY alMapBufferDirectSOFT(ALCcontext *context, ALuint 
     else
     {
         ALbitfieldSOFT unavailable = (albuf->Access^access) & access;
-        if(ReadRef(albuf->ref) != 0 && !(access&AL_MAP_PERSISTENT_BIT_SOFT)) UNLIKELY
+        if(albuf->ref.load(std::memory_order_relaxed) != 0
+            && !(access&AL_MAP_PERSISTENT_BIT_SOFT)) UNLIKELY
             context->setError(AL_INVALID_OPERATION,
                 "Mapping in-use buffer %u without persistent mapping", buffer);
         else if(albuf->MappedAccess != 0) UNLIKELY
@@ -1026,7 +1049,7 @@ FORCE_ALIGN void AL_APIENTRY alBufferiDirect(ALCcontext *context, ALuint buffer,
         break;
 
     case AL_AMBISONIC_LAYOUT_SOFT:
-        if(ReadRef(albuf->ref) != 0) UNLIKELY
+        if(albuf->ref.load(std::memory_order_relaxed) != 0) UNLIKELY
             context->setError(AL_INVALID_OPERATION, "Modifying in-use buffer %u's ambisonic layout",
                 buffer);
         else if(const auto layout = AmbiLayoutFromEnum(value))
@@ -1036,7 +1059,7 @@ FORCE_ALIGN void AL_APIENTRY alBufferiDirect(ALCcontext *context, ALuint buffer,
         break;
 
     case AL_AMBISONIC_SCALING_SOFT:
-        if(ReadRef(albuf->ref) != 0) UNLIKELY
+        if(albuf->ref.load(std::memory_order_relaxed) != 0) UNLIKELY
             context->setError(AL_INVALID_OPERATION, "Modifying in-use buffer %u's ambisonic scaling",
                 buffer);
         else if(const auto scaling = AmbiScalingFromEnum(value))
@@ -1100,7 +1123,7 @@ FORCE_ALIGN void AL_APIENTRY alBufferivDirect(ALCcontext *context, ALuint buffer
     else switch(param)
     {
     case AL_LOOP_POINTS_SOFT:
-        if(ReadRef(albuf->ref) != 0) UNLIKELY
+        if(albuf->ref.load(std::memory_order_relaxed) != 0) UNLIKELY
             context->setError(AL_INVALID_OPERATION, "Modifying in-use buffer %u's loop points",
                 buffer);
         else if(values[0] < 0 || values[0] >= values[1]
@@ -1350,7 +1373,7 @@ FORCE_ALIGN void AL_APIENTRY alGetBufferPtrDirectSOFT(ALCcontext *context, ALuin
     else switch(param)
     {
     case AL_BUFFER_CALLBACK_FUNCTION_SOFT:
-        *value = al::bit_cast<void*>(albuf->mCallback);
+        *value = reinterpret_cast<void*>(albuf->mCallback);
         break;
     case AL_BUFFER_CALLBACK_USER_PARAM_SOFT:
         *value = albuf->mUserData;
@@ -1464,11 +1487,11 @@ BufferSubList::~BufferSubList()
     while(usemask)
     {
         const int idx{al::countr_zero(usemask)};
-        std::destroy_at(Buffers+idx);
+        std::destroy_at(al::to_address(Buffers->begin() + idx));
         usemask &= ~(1_u64 << idx);
     }
     FreeMask = ~usemask;
-    al_free(Buffers);
+    SubListAllocator{}.deallocate(Buffers, 1);
     Buffers = nullptr;
 }
 

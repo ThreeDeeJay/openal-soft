@@ -14,12 +14,13 @@ class base_exception : public std::exception {
 
 protected:
     base_exception() = default;
-    virtual ~base_exception();
 
-    void setMessage(const char *msg, std::va_list args);
+    auto setMessage(const char *msg, std::va_list args) -> void;
 
 public:
-    const char *what() const noexcept override { return mMessage.c_str(); }
+    ~base_exception() override;
+
+    [[nodiscard]] auto what() const noexcept -> const char* override { return mMessage.c_str(); }
 };
 
 } // namespace al

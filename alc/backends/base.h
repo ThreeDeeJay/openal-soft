@@ -11,6 +11,7 @@
 
 #include "core/device.h"
 #include "core/except.h"
+#include "alc/events.h"
 
 
 using uint = unsigned int;
@@ -51,18 +52,6 @@ enum class BackendType {
 };
 
 
-/* Helper to get the current clock time from the device's ClockBase, and
- * SamplesDone converted from the sample rate.
- */
-inline std::chrono::nanoseconds GetDeviceClockTime(DeviceBase *device)
-{
-    using std::chrono::seconds;
-    using std::chrono::nanoseconds;
-
-    auto ns = nanoseconds{seconds{device->SamplesDone}} / device->Frequency;
-    return device->ClockBase + ns;
-}
-
 /* Helper to get the device latency from the backend, including any fixed
  * latency from post-processing.
  */
@@ -75,16 +64,18 @@ inline ClockLatency GetClockLatency(DeviceBase *device, BackendBase *backend)
 
 
 struct BackendFactory {
+    virtual ~BackendFactory() = default;
+
     virtual bool init() = 0;
 
     virtual bool querySupport(BackendType type) = 0;
 
+    virtual alc::EventSupport queryEventSupport(alc::EventType, BackendType)
+    { return alc::EventSupport::NoSupport; }
+
     virtual std::string probe(BackendType type) = 0;
 
     virtual BackendPtr createBackend(DeviceBase *device, BackendType type) = 0;
-
-protected:
-    virtual ~BackendFactory() = default;
 };
 
 namespace al {
@@ -99,15 +90,15 @@ class backend_exception final : public base_exception {
     backend_error mErrorCode;
 
 public:
-#ifdef __USE_MINGW_ANSI_STDIO
-    [[gnu::format(gnu_printf, 3, 4)]]
+#ifdef __MINGW32__
+    [[gnu::format(__MINGW_PRINTF_FORMAT, 3, 4)]]
 #else
     [[gnu::format(printf, 3, 4)]]
 #endif
     backend_exception(backend_error code, const char *msg, ...);
     ~backend_exception() override;
 
-    backend_error errorCode() const noexcept { return mErrorCode; }
+    [[nodiscard]] auto errorCode() const noexcept -> backend_error { return mErrorCode; }
 };
 
 } // namespace al

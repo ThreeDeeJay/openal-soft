@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <iterator>
 #include <limits>
@@ -37,16 +38,16 @@ enum class SourceStereo : bool {
     Enhanced = AL_SUPER_STEREO_SOFT
 };
 
-#define DEFAULT_SENDS  2
+inline constexpr size_t DefaultSendCount{2};
 
-#define INVALID_VOICE_IDX static_cast<ALuint>(-1)
+inline constexpr ALuint InvalidVoiceIndex{std::numeric_limits<ALuint>::max()};
 
-extern bool sBufferSubDataCompat;
+inline bool sBufferSubDataCompat{false};
 
 struct ALbufferQueueItem : public VoiceBufferItem {
     ALbuffer *mBuffer{nullptr};
 
-    DISABLE_ALLOC()
+    DISABLE_ALLOC
 };
 
 
@@ -108,21 +109,21 @@ struct ALsource {
 
     /** Direct filter and auxiliary send info. */
     struct {
-        float Gain;
-        float GainHF;
-        float HFReference;
-        float GainLF;
-        float LFReference;
+        float Gain{};
+        float GainHF{};
+        float HFReference{};
+        float GainLF{};
+        float LFReference{};
     } Direct;
     struct SendData {
-        ALeffectslot *Slot;
-        float Gain;
-        float GainHF;
-        float HFReference;
-        float GainLF;
-        float LFReference;
+        ALeffectslot *Slot{};
+        float Gain{};
+        float GainHF{};
+        float HFReference{};
+        float GainLF{};
+        float LFReference{};
     };
-    std::array<SendData,MAX_SENDS> Send;
+    std::array<SendData,MaxSendCount> Send;
 
     /**
      * Last user-specified offset, and the offset type (bytes, samples, or
@@ -145,7 +146,7 @@ struct ALsource {
     /* Index into the context's Voices array. Lazily updated, only checked and
      * reset when looking up the voice.
      */
-    ALuint VoiceIdx{INVALID_VOICE_IDX};
+    ALuint VoiceIdx{InvalidVoiceIndex};
 
     /** Self ID */
     ALuint id{0};
@@ -159,7 +160,7 @@ struct ALsource {
 
     static void SetName(ALCcontext *context, ALuint id, std::string_view name);
 
-    DISABLE_ALLOC()
+    DISABLE_ALLOC
 
 #ifdef ALSOFT_EAX
 public:
@@ -173,18 +174,18 @@ public:
 private:
     using Exception = EaxSourceException;
 
-    static constexpr auto eax_max_speakers = 9;
+    static constexpr auto eax_max_speakers{9u};
 
-    using EaxFxSlotIds = const GUID* [EAX_MAX_FXSLOTS];
+    using EaxFxSlotIds = std::array<const GUID*,EAX_MAX_FXSLOTS>;
 
-    static constexpr const EaxFxSlotIds eax4_fx_slot_ids = {
+    static constexpr const EaxFxSlotIds eax4_fx_slot_ids{
         &EAXPROPERTYID_EAX40_FXSlot0,
         &EAXPROPERTYID_EAX40_FXSlot1,
         &EAXPROPERTYID_EAX40_FXSlot2,
         &EAXPROPERTYID_EAX40_FXSlot3,
     };
 
-    static constexpr const EaxFxSlotIds eax5_fx_slot_ids = {
+    static constexpr const EaxFxSlotIds eax5_fx_slot_ids{
         &EAXPROPERTYID_EAX50_FXSlot0,
         &EAXPROPERTYID_EAX50_FXSlot1,
         &EAXPROPERTYID_EAX50_FXSlot2,
@@ -839,11 +840,10 @@ private:
         float path_ratio,
         float lf_ratio) noexcept;
 
-    EaxAlLowPassParam eax_create_direct_filter_param() const noexcept;
+    [[nodiscard]] auto eax_create_direct_filter_param() const noexcept -> EaxAlLowPassParam;
 
-    EaxAlLowPassParam eax_create_room_filter_param(
-        const ALeffectslot& fx_slot,
-        const EAXSOURCEALLSENDPROPERTIES& send) const noexcept;
+    [[nodiscard]] auto eax_create_room_filter_param(const ALeffectslot& fx_slot,
+        const EAXSOURCEALLSENDPROPERTIES& send) const noexcept -> EaxAlLowPassParam;
 
     void eax_update_direct_filter();
     void eax_update_room_filters();
@@ -978,21 +978,21 @@ private:
     }
 
     template<typename TValidator, size_t TIdCount>
-    void eax_defer_active_fx_slot_id(const EaxCall& call, GUID (&dst_ids)[TIdCount])
+    void eax_defer_active_fx_slot_id(const EaxCall& call, const al::span<GUID,TIdCount> dst_ids)
     {
         const auto src_ids = call.get_values<const GUID>(TIdCount);
         std::for_each(src_ids.cbegin(), src_ids.cend(), TValidator{});
-        std::uninitialized_copy(src_ids.cbegin(), src_ids.cend(), dst_ids);
+        std::uninitialized_copy(src_ids.cbegin(), src_ids.cend(), dst_ids.begin());
     }
 
     template<size_t TIdCount>
-    void eax4_defer_active_fx_slot_id(const EaxCall& call, GUID (&dst_ids)[TIdCount])
+    void eax4_defer_active_fx_slot_id(const EaxCall& call, const al::span<GUID,TIdCount> dst_ids)
     {
         eax_defer_active_fx_slot_id<Eax4ActiveFxSlotIdValidator>(call, dst_ids);
     }
 
     template<size_t TIdCount>
-    void eax5_defer_active_fx_slot_id(const EaxCall& call, GUID (&dst_ids)[TIdCount])
+    void eax5_defer_active_fx_slot_id(const EaxCall& call, const al::span<GUID,TIdCount> dst_ids)
     {
         eax_defer_active_fx_slot_id<Eax5ActiveFxSlotIdValidator>(call, dst_ids);
     }
@@ -1042,5 +1042,20 @@ private:
 };
 
 void UpdateAllSourceProps(ALCcontext *context);
+
+struct SourceSubList {
+    uint64_t FreeMask{~0_u64};
+    gsl::owner<std::array<ALsource,64>*> Sources{nullptr};
+
+    SourceSubList() noexcept = default;
+    SourceSubList(const SourceSubList&) = delete;
+    SourceSubList(SourceSubList&& rhs) noexcept : FreeMask{rhs.FreeMask}, Sources{rhs.Sources}
+    { rhs.FreeMask = ~0_u64; rhs.Sources = nullptr; }
+    ~SourceSubList();
+
+    SourceSubList& operator=(const SourceSubList&) = delete;
+    SourceSubList& operator=(SourceSubList&& rhs) noexcept
+    { std::swap(FreeMask, rhs.FreeMask); std::swap(Sources, rhs.Sources); return *this; }
+};
 
 #endif

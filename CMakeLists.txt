@@ -329,7 +329,7 @@ else()
     option(ALSOFT_STATIC_STDCXX "Static link libstdc++" OFF)
     if(ALSOFT_STATIC_STDCXX)
         set(OLD_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES})
-        set(CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES} "-Wl,--push-state,-Bstatic,-lstdc++,--pop-state")
+        set(CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES} "-static-libstdc++")
         check_cxx_source_compiles("int main() { }" HAVE_STATIC_LIBSTDCXX_SWITCH)
         set(CMAKE_REQUIRED_LIBRARIES ${OLD_REQUIRED_LIBRARIES})
         unset(OLD_REQUIRED_LIBRARIES)
@@ -337,7 +337,7 @@ else()
         if(NOT HAVE_STATIC_LIBSTDCXX_SWITCH)
             message(FATAL_ERROR "Cannot static link libstdc++")
         endif()
-        set(LINKER_FLAGS ${LINKER_FLAGS} "-Wl,--push-state,-Bstatic,-lstdc++,--pop-state")
+        set(LINKER_FLAGS ${LINKER_FLAGS} "-static-libstdc++")
     endif()
 
     if(WIN32)
@@ -565,8 +565,6 @@ if(HAVE_INTRIN_H)
         }" HAVE_CPUID_INTRINSIC)
 endif()
 
-check_symbol_exists(posix_memalign   stdlib.h HAVE_POSIX_MEMALIGN)
-check_symbol_exists(_aligned_malloc  malloc.h HAVE__ALIGNED_MALLOC)
 check_symbol_exists(proc_pidpath     libproc.h HAVE_PROC_PIDPATH)
 
 if(NOT WIN32)
@@ -612,7 +610,6 @@ set(COMMON_OBJS
     common/alcomplex.h
     common/alfstream.cpp
     common/alfstream.h
-    common/almalloc.cpp
     common/almalloc.h
     common/alnumbers.h
     common/alnumeric.h
@@ -628,6 +625,7 @@ set(COMMON_OBJS
     common/comptr.h
     common/dynload.cpp
     common/dynload.h
+    common/flexarray.h
     common/intrusive_ptr.h
     common/opthelpers.h
     common/pffft.cpp
@@ -1338,7 +1336,8 @@ configure_file(
 
 
 add_library(alcommon STATIC EXCLUDE_FROM_ALL ${COMMON_OBJS})
-target_include_directories(alcommon PRIVATE ${OpenAL_BINARY_DIR} ${OpenAL_SOURCE_DIR}/include)
+target_include_directories(alcommon PRIVATE ${OpenAL_BINARY_DIR} ${OpenAL_SOURCE_DIR}/include
+    PUBLIC ${OpenAL_SOURCE_DIR}/common)
 target_compile_definitions(alcommon PRIVATE ${CPP_DEFS})
 target_compile_options(alcommon PRIVATE ${C_FLAGS})
 set_target_properties(alcommon PROPERTIES ${DEFAULT_TARGET_PROPS} POSITION_INDEPENDENT_CODE TRUE)

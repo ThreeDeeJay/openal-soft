@@ -1,6 +1,7 @@
 #ifndef ALC_CONTEXT_H
 #define ALC_CONTEXT_H
 
+#include <array>
 #include <atomic>
 #include <deque>
 #include <memory>
@@ -36,6 +37,8 @@ struct ALeffect;
 struct ALeffectslot;
 struct ALsource;
 struct DebugGroup;
+struct EffectSlotSubList;
+struct SourceSubList;
 
 enum class DebugSource : uint8_t;
 enum class DebugType : uint8_t;
@@ -67,37 +70,6 @@ struct DebugLogEntry {
     DebugLogEntry(DebugLogEntry&&) = default;
 };
 
-
-struct SourceSubList {
-    uint64_t FreeMask{~0_u64};
-    ALsource *Sources{nullptr}; /* 64 */
-
-    SourceSubList() noexcept = default;
-    SourceSubList(const SourceSubList&) = delete;
-    SourceSubList(SourceSubList&& rhs) noexcept : FreeMask{rhs.FreeMask}, Sources{rhs.Sources}
-    { rhs.FreeMask = ~0_u64; rhs.Sources = nullptr; }
-    ~SourceSubList();
-
-    SourceSubList& operator=(const SourceSubList&) = delete;
-    SourceSubList& operator=(SourceSubList&& rhs) noexcept
-    { std::swap(FreeMask, rhs.FreeMask); std::swap(Sources, rhs.Sources); return *this; }
-};
-
-struct EffectSlotSubList {
-    uint64_t FreeMask{~0_u64};
-    ALeffectslot *EffectSlots{nullptr}; /* 64 */
-
-    EffectSlotSubList() noexcept = default;
-    EffectSlotSubList(const EffectSlotSubList&) = delete;
-    EffectSlotSubList(EffectSlotSubList&& rhs) noexcept
-      : FreeMask{rhs.FreeMask}, EffectSlots{rhs.EffectSlots}
-    { rhs.FreeMask = ~0_u64; rhs.EffectSlots = nullptr; }
-    ~EffectSlotSubList();
-
-    EffectSlotSubList& operator=(const EffectSlotSubList&) = delete;
-    EffectSlotSubList& operator=(EffectSlotSubList&& rhs) noexcept
-    { std::swap(FreeMask, rhs.FreeMask); std::swap(EffectSlots, rhs.EffectSlots); return *this; }
-};
 
 struct ALCcontext : public al::intrusive_ref<ALCcontext>, ContextBase {
     const al::intrusive_ptr<ALCdevice> mALDevice;
@@ -158,10 +130,10 @@ struct ALCcontext : public al::intrusive_ref<ALCcontext>, ContextBase {
     void init();
     /**
      * Removes the context from its device and removes it from being current on
-     * the running thread or globally. Returns true if other contexts still
-     * exist on the device.
+     * the running thread or globally. Stops device playback if this was the
+     * last context on its device.
      */
-    bool deinit();
+    void deinit();
 
     /**
      * Defers/suspends updates for the given context's listener and sources.
@@ -186,8 +158,8 @@ struct ALCcontext : public al::intrusive_ref<ALCcontext>, ContextBase {
      */
     void applyAllUpdates();
 
-#ifdef __USE_MINGW_ANSI_STDIO
-    [[gnu::format(gnu_printf, 3, 4)]]
+#ifdef __MINGW32__
+    [[gnu::format(__MINGW_PRINTF_FORMAT, 3, 4)]]
 #else
     [[gnu::format(printf, 3, 4)]]
 #endif
@@ -230,10 +202,7 @@ public:
     /* Default effect that applies to sources that don't have an effect on send 0. */
     static ALeffect sDefaultEffect;
 
-    DEF_NEWDEL(ALCcontext)
-
 #ifdef ALSOFT_EAX
-public:
     bool hasEax() const noexcept { return mEaxIsInitialized; }
     bool eaxIsCapable() const noexcept;
 
@@ -560,7 +529,7 @@ private:
 
 using ContextRef = al::intrusive_ptr<ALCcontext>;
 
-ContextRef GetContextRef(void);
+ContextRef GetContextRef();
 
 void UpdateContextProps(ALCcontext *context);
 

@@ -28,7 +28,6 @@
 #include <iterator>
 
 #include "alc/effects/base.h"
-#include "alcomplex.h"
 #include "almalloc.h"
 #include "alnumbers.h"
 #include "alnumeric.h"
@@ -40,6 +39,7 @@
 #include "core/mixer.h"
 #include "core/mixer/defs.h"
 #include "intrusive_ptr.h"
+#include "pffft.h"
 
 struct ContextBase;
 
@@ -58,7 +58,7 @@ constexpr size_t StftStep{StftSize / OversampleFactor};
 
 /* Define a Hann window, used to filter the STFT input and output. */
 struct Windower {
-    alignas(16) std::array<float,StftSize> mData;
+    alignas(16) std::array<float,StftSize> mData{};
 
     Windower()
     {
@@ -82,27 +82,29 @@ struct FrequencyBin {
 
 struct PshifterState final : public EffectState {
     /* Effect parameters */
-    size_t mCount;
-    size_t mPos;
-    uint mPitchShiftI;
-    float mPitchShift;
+    size_t mCount{};
+    size_t mPos{};
+    uint mPitchShiftI{};
+    float mPitchShift{};
 
     /* Effects buffers */
-    std::array<float,StftSize> mFIFO;
-    std::array<float,StftHalfSize+1> mLastPhase;
-    std::array<float,StftHalfSize+1> mSumPhase;
-    std::array<float,StftSize> mOutputAccum;
+    std::array<float,StftSize> mFIFO{};
+    std::array<float,StftHalfSize+1> mLastPhase{};
+    std::array<float,StftHalfSize+1> mSumPhase{};
+    std::array<float,StftSize> mOutputAccum{};
 
-    std::array<complex_f,StftSize> mFftBuffer;
+    PFFFTSetup mFft;
+    alignas(16) std::array<float,StftSize> mFftBuffer{};
+    alignas(16) std::array<float,StftSize> mFftWorkBuffer{};
 
-    std::array<FrequencyBin,StftHalfSize+1> mAnalysisBuffer;
-    std::array<FrequencyBin,StftHalfSize+1> mSynthesisBuffer;
+    std::array<FrequencyBin,StftHalfSize+1> mAnalysisBuffer{};
+    std::array<FrequencyBin,StftHalfSize+1> mSynthesisBuffer{};
 
-    alignas(16) FloatBufferLine mBufferOut;
+    alignas(16) FloatBufferLine mBufferOut{};
 
     /* Effect gains for each output channel */
-    float mCurrentGains[MaxAmbiChannels];
-    float mTargetGains[MaxAmbiChannels];
+    std::array<float,MaxAmbiChannels> mCurrentGains{};
+    std::array<float,MaxAmbiChannels> mTargetGains{};
 
 
     void deviceUpdate(const DeviceBase *device, const BufferStorage *buffer) override;
@@ -110,8 +112,6 @@ struct PshifterState final : public EffectState {
         const EffectTarget target) override;
     void process(const size_t samplesToDo, const al::span<const FloatBufferLine> samplesIn,
         const al::span<FloatBufferLine> samplesOut) override;
-
-    DEF_NEWDEL(PshifterState)
 };
 
 void PshifterState::deviceUpdate(const DeviceBase*, const BufferStorage*)
@@ -126,18 +126,22 @@ void PshifterState::deviceUpdate(const DeviceBase*, const BufferStorage*)
     mLastPhase.fill(0.0f);
     mSumPhase.fill(0.0f);
     mOutputAccum.fill(0.0f);
-    mFftBuffer.fill(complex_f{});
+    mFftBuffer.fill(0.0f);
     mAnalysisBuffer.fill(FrequencyBin{});
     mSynthesisBuffer.fill(FrequencyBin{});
 
-    std::fill(std::begin(mCurrentGains), std::end(mCurrentGains), 0.0f);
-    std::fill(std::begin(mTargetGains),  std::end(mTargetGains),  0.0f);
+    mCurrentGains.fill(0.0f);
+    mTargetGains.fill(0.0f);
+
+    if(!mFft)
+        mFft = PFFFTSetup{StftSize, PFFFT_REAL};
 }
 
 void PshifterState::update(const ContextBase*, const EffectSlot *slot,
-    const EffectProps *props, const EffectTarget target)
+    const EffectProps *props_, const EffectTarget target)
 {
-    const int tune{props->Pshifter.CoarseTune*100 + props->Pshifter.FineTune};
+    auto &props = std::get<PshifterProps>(*props_);
+    const int tune{props.CoarseTune*100 + props.FineTune};
     const float pitch{std::pow(2.0f, static_cast<float>(tune) / 1200.0f)};
     mPitchShiftI = clampu(fastf2u(pitch*MixerFracOne), MixerFracHalf, MixerFracOne*2);
     mPitchShift  = static_cast<float>(mPitchShiftI) * float{1.0f/MixerFracOne};
@@ -186,15 +190,19 @@ void PshifterState::process(const size_t samplesToDo,
             mFftBuffer[k] = mFIFO[src] * gWindow.mData[k];
         for(size_t src{0u}, k{StftSize-mPos};src < mPos;++src,++k)
             mFftBuffer[k] = mFIFO[src] * gWindow.mData[k];
-        forward_fft(al::span{mFftBuffer});
+        mFft.transform_ordered(mFftBuffer.data(), mFftBuffer.data(), mFftWorkBuffer.data(),
+            PFFFT_FORWARD);
 
         /* Analyze the obtained data. Since the real FFT is symmetric, only
          * StftHalfSize+1 samples are needed.
          */
-        for(size_t k{0u};k < StftHalfSize+1;k++)
+        for(size_t k{0u};k < StftHalfSize+1;++k)
         {
-            const float magnitude{std::abs(mFftBuffer[k])};
-            const float phase{std::arg(mFftBuffer[k])};
+            const auto cplx = (k == 0) ? complex_f{mFftBuffer[0]} :
+                (k == StftHalfSize) ? complex_f{mFftBuffer[1]} :
+                complex_f{mFftBuffer[k*2], mFftBuffer[k*2 + 1]};
+            const float magnitude{std::abs(cplx)};
+            const float phase{std::arg(cplx)};
 
             /* Compute the phase difference from the last update and subtract
              * the expected phase difference for this bin.
@@ -266,21 +274,29 @@ void PshifterState::process(const size_t samplesToDo,
             tmp -= static_cast<float>(qpd + (qpd%2));
             mSumPhase[k] = tmp * al::numbers::pi_v<float>;
 
-            mFftBuffer[k] = std::polar(mSynthesisBuffer[k].Magnitude, mSumPhase[k]);
+            const complex_f cplx{std::polar(mSynthesisBuffer[k].Magnitude, mSumPhase[k])};
+            if(k == 0)
+                mFftBuffer[0] = cplx.real();
+            else if(k == StftHalfSize)
+                mFftBuffer[1] = cplx.real();
+            else
+            {
+                mFftBuffer[k*2 + 0] = cplx.real();
+                mFftBuffer[k*2 + 1] = cplx.imag();
+            }
         }
-        for(size_t k{StftHalfSize+1};k < StftSize;++k)
-            mFftBuffer[k] = std::conj(mFftBuffer[StftSize-k]);
 
         /* Apply an inverse FFT to get the time-domain signal, and accumulate
          * for the output with windowing.
          */
-        inverse_fft(al::span{mFftBuffer});
+        mFft.transform_ordered(mFftBuffer.data(), mFftBuffer.data(), mFftWorkBuffer.data(),
+            PFFFT_BACKWARD);
 
         static constexpr float scale{3.0f / OversampleFactor / StftSize};
         for(size_t dst{mPos}, k{0u};dst < StftSize;++dst,++k)
-            mOutputAccum[dst] += gWindow.mData[k]*mFftBuffer[k].real() * scale;
+            mOutputAccum[dst] += gWindow.mData[k]*mFftBuffer[k] * scale;
         for(size_t dst{0u}, k{StftSize-mPos};dst < mPos;++dst,++k)
-            mOutputAccum[dst] += gWindow.mData[k]*mFftBuffer[k].real() * scale;
+            mOutputAccum[dst] += gWindow.mData[k]*mFftBuffer[k] * scale;
 
         /* Copy out the accumulated result, then clear for the next iteration. */
         std::copy_n(mOutputAccum.begin() + mPos, StftStep, mFIFO.begin() + mPos);
@@ -288,8 +304,8 @@ void PshifterState::process(const size_t samplesToDo,
     }
 
     /* Now, mix the processed sound data to the output. */
-    MixSamples({mBufferOut.data(), samplesToDo}, samplesOut, mCurrentGains, mTargetGains,
-        maxz(samplesToDo, 512), 0);
+    MixSamples({mBufferOut.data(), samplesToDo}, samplesOut, mCurrentGains.data(),
+        mTargetGains.data(), maxz(samplesToDo, 512), 0);
 }
 
 

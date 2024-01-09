@@ -47,6 +47,8 @@
 
 #include "common/alhelpers.h"
 
+#include "win_main_utf8.h"
+
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -106,7 +108,8 @@ static int LoadEffect(ALuint effect, const EFXEAXREVERBPROPERTIES *reverb)
      * the needed panning vectors).
      */
     alEffecti(effect, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
-    if((err=alGetError()) != AL_NO_ERROR)
+    err = alGetError();
+    if(err != AL_NO_ERROR)
     {
         fprintf(stderr, "Failed to set EAX Reverb: %s (0x%04x)\n", alGetString(err), err);
         return 0;
@@ -138,7 +141,8 @@ static int LoadEffect(ALuint effect, const EFXEAXREVERBPROPERTIES *reverb)
     alEffecti(effect, AL_EAXREVERB_DECAY_HFLIMIT, reverb->iDecayHFLimit);
 
     /* Check if an error occurred, and return failure if so. */
-    if((err=alGetError()) != AL_NO_ERROR)
+    err = alGetError();
+    if(err != AL_NO_ERROR)
     {
         fprintf(stderr, "Error setting up reverb: %s\n", alGetString(err));
         return 0;

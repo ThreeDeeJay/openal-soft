@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 
 #include "AL/al.h"
@@ -12,6 +13,7 @@
 #include "alc/device.h"
 #include "alc/effects/base.h"
 #include "almalloc.h"
+#include "alnumeric.h"
 #include "atomic.h"
 #include "core/effectslot.h"
 #include "intrusive_ptr.h"
@@ -63,7 +65,7 @@ struct ALeffectslot {
 
     SlotState mState{SlotState::Initial};
 
-    RefCount ref{0u};
+    std::atomic<ALuint> ref{0u};
 
     EffectSlot *mSlot{nullptr};
 
@@ -81,20 +83,17 @@ struct ALeffectslot {
 
     static void SetName(ALCcontext *context, ALuint id, std::string_view name);
 
-    /* This can be new'd for the context's default effect slot. */
-    DEF_NEWDEL(ALeffectslot)
-
 
 #ifdef ALSOFT_EAX
 public:
     void eax_initialize(ALCcontext& al_context, EaxFxSlotIndexValue index);
 
-    EaxFxSlotIndexValue eax_get_index() const noexcept { return eax_fx_slot_index_; }
-    const EAX50FXSLOTPROPERTIES& eax_get_eax_fx_slot() const noexcept
+    [[nodiscard]] auto eax_get_index() const noexcept -> EaxFxSlotIndexValue { return eax_fx_slot_index_; }
+    [[nodiscard]] auto eax_get_eax_fx_slot() const noexcept -> const EAX50FXSLOTPROPERTIES&
     { return eax_; }
 
     // Returns `true` if all sources should be updated, or `false` otherwise.
-    bool eax_dispatch(const EaxCall& call)
+    [[nodiscard]] auto eax_dispatch(const EaxCall& call) -> bool
     { return call.is_get() ? eax_get(call) : eax_set(call); }
 
     void eax_commit();
@@ -282,14 +281,14 @@ private:
         dst = src;
     }
 
-    constexpr bool eax4_fx_slot_is_legacy() const noexcept
+    [[nodiscard]] constexpr auto eax4_fx_slot_is_legacy() const noexcept -> bool
     { return eax_fx_slot_index_ < 2; }
 
     void eax4_fx_slot_ensure_unlocked() const;
 
-    static ALenum eax_get_efx_effect_type(const GUID& guid);
-    const GUID& eax_get_eax_default_effect_guid() const noexcept;
-    long eax_get_eax_default_lock() const noexcept;
+    [[nodiscard]] static auto eax_get_efx_effect_type(const GUID& guid) -> ALenum;
+    [[nodiscard]] auto eax_get_eax_default_effect_guid() const noexcept -> const GUID&;
+    [[nodiscard]] auto eax_get_eax_default_lock() const noexcept -> long;
 
     void eax4_fx_slot_set_defaults(Eax4Props& props) noexcept;
     void eax5_fx_slot_set_defaults(Eax5Props& props) noexcept;
@@ -312,7 +311,7 @@ private:
     void eax4_fx_slot_set_all(const EaxCall& call);
     void eax5_fx_slot_set_all(const EaxCall& call);
 
-    bool eax_fx_slot_should_update_sources() const noexcept;
+    [[nodiscard]] auto eax_fx_slot_should_update_sources() const noexcept -> bool;
 
     // Returns `true` if all sources should be updated, or `false` otherwise.
     bool eax4_fx_slot_set(const EaxCall& call);
@@ -369,5 +368,21 @@ using EaxAlEffectSlotUPtr = std::unique_ptr<ALeffectslot, ALeffectslot::EaxDelet
 EaxAlEffectSlotUPtr eax_create_al_effect_slot(ALCcontext& context);
 void eax_delete_al_effect_slot(ALCcontext& context, ALeffectslot& effect_slot);
 #endif // ALSOFT_EAX
+
+struct EffectSlotSubList {
+    uint64_t FreeMask{~0_u64};
+    gsl::owner<std::array<ALeffectslot,64>*> EffectSlots{nullptr};
+
+    EffectSlotSubList() noexcept = default;
+    EffectSlotSubList(const EffectSlotSubList&) = delete;
+    EffectSlotSubList(EffectSlotSubList&& rhs) noexcept
+      : FreeMask{rhs.FreeMask}, EffectSlots{rhs.EffectSlots}
+    { rhs.FreeMask = ~0_u64; rhs.EffectSlots = nullptr; }
+    ~EffectSlotSubList();
+
+    EffectSlotSubList& operator=(const EffectSlotSubList&) = delete;
+    EffectSlotSubList& operator=(EffectSlotSubList&& rhs) noexcept
+    { std::swap(FreeMask, rhs.FreeMask); std::swap(EffectSlots, rhs.EffectSlots); return *this; }
+};
 
 #endif

@@ -2,7 +2,8 @@
 #define CORE_EFFECTS_BASE_H
 
 #include <array>
-#include <stddef.h>
+#include <cstddef>
+#include <variant>
 
 #include "almalloc.h"
 #include "alspan.h"
@@ -19,21 +20,21 @@ struct RealMixParams;
 
 
 /** Target gain for the reverb decay feedback reaching the decay time. */
-constexpr float ReverbDecayGain{0.001f}; /* -60 dB */
+inline constexpr float ReverbDecayGain{0.001f}; /* -60 dB */
 
-constexpr float ReverbMaxReflectionsDelay{0.3f};
-constexpr float ReverbMaxLateReverbDelay{0.1f};
+inline constexpr float ReverbMaxReflectionsDelay{0.3f};
+inline constexpr float ReverbMaxLateReverbDelay{0.1f};
 
 enum class ChorusWaveform {
     Sinusoid,
     Triangle
 };
 
-constexpr float ChorusMaxDelay{0.016f};
-constexpr float FlangerMaxDelay{0.004f};
+inline constexpr float ChorusMaxDelay{0.016f};
+inline constexpr float FlangerMaxDelay{0.004f};
 
-constexpr float EchoMaxDelay{0.207f};
-constexpr float EchoMaxLRDelay{0.404f};
+inline constexpr float EchoMaxDelay{0.207f};
+inline constexpr float EchoMaxLRDelay{0.404f};
 
 enum class FShifterDirection {
     Down,
@@ -59,119 +60,147 @@ enum class VMorpherWaveform {
     Sawtooth
 };
 
-union EffectProps {
-    struct {
-        float Density;
-        float Diffusion;
-        float Gain;
-        float GainHF;
-        float GainLF;
-        float DecayTime;
-        float DecayHFRatio;
-        float DecayLFRatio;
-        float ReflectionsGain;
-        float ReflectionsDelay;
-        float ReflectionsPan[3];
-        float LateReverbGain;
-        float LateReverbDelay;
-        float LateReverbPan[3];
-        float EchoTime;
-        float EchoDepth;
-        float ModulationTime;
-        float ModulationDepth;
-        float AirAbsorptionGainHF;
-        float HFReference;
-        float LFReference;
-        float RoomRolloffFactor;
-        bool DecayHFLimit;
-    } Reverb;
-
-    struct {
-        float AttackTime;
-        float ReleaseTime;
-        float Resonance;
-        float PeakGain;
-    } Autowah;
-
-    struct {
-        ChorusWaveform Waveform;
-        int Phase;
-        float Rate;
-        float Depth;
-        float Feedback;
-        float Delay;
-    } Chorus; /* Also Flanger */
-
-    struct {
-        bool OnOff;
-    } Compressor;
-
-    struct {
-        float Edge;
-        float Gain;
-        float LowpassCutoff;
-        float EQCenter;
-        float EQBandwidth;
-    } Distortion;
-
-    struct {
-        float Delay;
-        float LRDelay;
-
-        float Damping;
-        float Feedback;
-
-        float Spread;
-    } Echo;
-
-    struct {
-        float LowCutoff;
-        float LowGain;
-        float Mid1Center;
-        float Mid1Gain;
-        float Mid1Width;
-        float Mid2Center;
-        float Mid2Gain;
-        float Mid2Width;
-        float HighCutoff;
-        float HighGain;
-    } Equalizer;
-
-    struct {
-        float Frequency;
-        FShifterDirection LeftDirection;
-        FShifterDirection RightDirection;
-    } Fshifter;
-
-    struct {
-        float Frequency;
-        float HighPassCutoff;
-        ModulatorWaveform Waveform;
-    } Modulator;
-
-    struct {
-        int CoarseTune;
-        int FineTune;
-    } Pshifter;
-
-    struct {
-        float Rate;
-        VMorpherPhenome PhonemeA;
-        VMorpherPhenome PhonemeB;
-        int PhonemeACoarseTuning;
-        int PhonemeBCoarseTuning;
-        VMorpherWaveform Waveform;
-    } Vmorpher;
-
-    struct {
-        float Gain;
-    } Dedicated;
-
-    struct {
-        std::array<float,3> OrientAt;
-        std::array<float,3> OrientUp;
-    } Convolution;
+struct ReverbProps {
+    float Density;
+    float Diffusion;
+    float Gain;
+    float GainHF;
+    float GainLF;
+    float DecayTime;
+    float DecayHFRatio;
+    float DecayLFRatio;
+    float ReflectionsGain;
+    float ReflectionsDelay;
+    std::array<float,3> ReflectionsPan;
+    float LateReverbGain;
+    float LateReverbDelay;
+    std::array<float,3> LateReverbPan;
+    float EchoTime;
+    float EchoDepth;
+    float ModulationTime;
+    float ModulationDepth;
+    float AirAbsorptionGainHF;
+    float HFReference;
+    float LFReference;
+    float RoomRolloffFactor;
+    bool DecayHFLimit;
 };
+
+struct AutowahProps {
+    float AttackTime;
+    float ReleaseTime;
+    float Resonance;
+    float PeakGain;
+};
+
+struct ChorusProps {
+    ChorusWaveform Waveform;
+    int Phase;
+    float Rate;
+    float Depth;
+    float Feedback;
+    float Delay;
+};
+
+struct FlangerProps {
+    ChorusWaveform Waveform;
+    int Phase;
+    float Rate;
+    float Depth;
+    float Feedback;
+    float Delay;
+};
+
+struct CompressorProps {
+    bool OnOff;
+};
+
+struct DistortionProps {
+    float Edge;
+    float Gain;
+    float LowpassCutoff;
+    float EQCenter;
+    float EQBandwidth;
+};
+
+struct EchoProps {
+    float Delay;
+    float LRDelay;
+
+    float Damping;
+    float Feedback;
+
+    float Spread;
+};
+
+struct EqualizerProps {
+    float LowCutoff;
+    float LowGain;
+    float Mid1Center;
+    float Mid1Gain;
+    float Mid1Width;
+    float Mid2Center;
+    float Mid2Gain;
+    float Mid2Width;
+    float HighCutoff;
+    float HighGain;
+};
+
+struct FshifterProps {
+    float Frequency;
+    FShifterDirection LeftDirection;
+    FShifterDirection RightDirection;
+};
+
+struct ModulatorProps {
+    float Frequency;
+    float HighPassCutoff;
+    ModulatorWaveform Waveform;
+};
+
+struct PshifterProps {
+    int CoarseTune;
+    int FineTune;
+};
+
+struct VmorpherProps {
+    float Rate;
+    VMorpherPhenome PhonemeA;
+    VMorpherPhenome PhonemeB;
+    int PhonemeACoarseTuning;
+    int PhonemeBCoarseTuning;
+    VMorpherWaveform Waveform;
+};
+
+struct DedicatedDialogProps {
+    float Gain;
+};
+
+struct DedicatedLfeProps {
+    float Gain;
+};
+
+struct ConvolutionProps {
+    std::array<float,3> OrientAt;
+    std::array<float,3> OrientUp;
+};
+
+using EffectProps = std::variant<std::monostate,
+    ReverbProps,
+    AutowahProps,
+    ChorusProps,
+    FlangerProps,
+    CompressorProps,
+    DistortionProps,
+    EchoProps,
+    EqualizerProps,
+    FshifterProps,
+    ModulatorProps,
+    PshifterProps,
+    VmorpherProps,
+    DedicatedDialogProps,
+    DedicatedLfeProps,
+    ConvolutionProps>;
 
 
 struct EffectTarget {

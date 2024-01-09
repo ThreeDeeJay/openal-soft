@@ -57,7 +57,7 @@ constexpr size_t HilStep{HilSize / OversampleFactor};
 
 /* Define a Hann window, used to filter the HIL input and output. */
 struct Windower {
-    alignas(16) std::array<double,HilSize> mData;
+    alignas(16) std::array<double,HilSize> mData{};
 
     Windower()
     {
@@ -91,10 +91,11 @@ struct FshifterState final : public EffectState {
     alignas(16) FloatBufferLine mBufferOut{};
 
     /* Effect gains for each output channel */
-    struct {
-        float Current[MaxAmbiChannels]{};
-        float Target[MaxAmbiChannels]{};
-    } mGains[2];
+    struct OutGains {
+        std::array<float,MaxAmbiChannels> Current{};
+        std::array<float,MaxAmbiChannels> Target{};
+    };
+    std::array<OutGains,2> mGains;
 
 
     void deviceUpdate(const DeviceBase *device, const BufferStorage *buffer) override;
@@ -102,8 +103,6 @@ struct FshifterState final : public EffectState {
         const EffectTarget target) override;
     void process(const size_t samplesToDo, const al::span<const FloatBufferLine> samplesIn,
         const al::span<FloatBufferLine> samplesOut) override;
-
-    DEF_NEWDEL(FshifterState)
 };
 
 void FshifterState::deviceUpdate(const DeviceBase*, const BufferStorage*)
@@ -122,20 +121,21 @@ void FshifterState::deviceUpdate(const DeviceBase*, const BufferStorage*)
 
     for(auto &gain : mGains)
     {
-        std::fill(std::begin(gain.Current), std::end(gain.Current), 0.0f);
-        std::fill(std::begin(gain.Target), std::end(gain.Target), 0.0f);
+        gain.Current.fill(0.0f);
+        gain.Target.fill(0.0f);
     }
 }
 
 void FshifterState::update(const ContextBase *context, const EffectSlot *slot,
-    const EffectProps *props, const EffectTarget target)
+    const EffectProps *props_, const EffectTarget target)
 {
+    auto &props = std::get<FshifterProps>(*props_);
     const DeviceBase *device{context->mDevice};
 
-    const float step{props->Fshifter.Frequency / static_cast<float>(device->Frequency)};
+    const float step{props.Frequency / static_cast<float>(device->Frequency)};
     mPhaseStep[0] = mPhaseStep[1] = fastf2u(minf(step, 1.0f) * MixerFracOne);
 
-    switch(props->Fshifter.LeftDirection)
+    switch(props.LeftDirection)
     {
     case FShifterDirection::Down:
         mSign[0] = -1.0;
@@ -149,7 +149,7 @@ void FshifterState::update(const ContextBase *context, const EffectSlot *slot,
         break;
     }
 
-    switch(props->Fshifter.RightDirection)
+    switch(props.RightDirection)
     {
     case FShifterDirection::Down:
         mSign[1] = -1.0;
@@ -235,8 +235,8 @@ void FshifterState::process(const size_t samplesToDo, const al::span<const Float
         mPhase[c] = phase_idx;
 
         /* Now, mix the processed sound data to the output. */
-        MixSamples({BufferOut, samplesToDo}, samplesOut, mGains[c].Current, mGains[c].Target,
-            maxz(samplesToDo, 512), 0);
+        MixSamples({BufferOut, samplesToDo}, samplesOut, mGains[c].Current.data(),
+            mGains[c].Target.data(), maxz(samplesToDo, 512), 0);
     }
 }
 

@@ -5,11 +5,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <functional>
 #include <limits>
 #include <numeric>
-#include <stddef.h>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -24,6 +24,7 @@
 #include "al/listener.h"
 #include "albit.h"
 #include "alc/alu.h"
+#include "alc/backends/base.h"
 #include "alspan.h"
 #include "core/async_event.h"
 #include "core/device.h"
@@ -32,6 +33,7 @@
 #include "core/voice.h"
 #include "core/voice_change.h"
 #include "device.h"
+#include "flexarray.h"
 #include "ringbuffer.h"
 #include "vecmat.h"
 
@@ -163,9 +165,13 @@ void ALCcontext::init()
     else
     {
         auxslots = EffectSlot::CreatePtrArray(1);
-        (*auxslots)[0] = mDefaultSlot->mSlot;
-        mDefaultSlot->mState = SlotState::Playing;
+        if(auxslots)
+        {
+            (*auxslots)[0] = mDefaultSlot->mSlot;
+            mDefaultSlot->mState = SlotState::Playing;
+        }
     }
+    if(!auxslots) throw std::bad_alloc{};
     mActiveAuxSlots.store(auxslots, std::memory_order_relaxed);
 
     allocVoiceChanges();
@@ -231,7 +237,7 @@ void ALCcontext::init()
     mActiveVoiceCount.store(64, std::memory_order_relaxed);
 }
 
-bool ALCcontext::deinit()
+void ALCcontext::deinit()
 {
     if(sLocalContext == this)
     {
@@ -251,18 +257,14 @@ bool ALCcontext::deinit()
         dec_ref();
     }
 
-    bool ret{};
+    bool stopPlayback{};
     /* First make sure this context exists in the device's list. */
     auto *oldarray = mDevice->mContexts.load(std::memory_order_acquire);
     if(auto toremove = static_cast<size_t>(std::count(oldarray->begin(), oldarray->end(), this)))
     {
         using ContextArray = al::FlexArray<ContextBase*>;
-        auto alloc_ctx_array = [](const size_t count) -> ContextArray*
-        {
-            if(count == 0) return &DeviceBase::sEmptyContextArray;
-            return ContextArray::Create(count).release();
-        };
-        auto *newarray = alloc_ctx_array(oldarray->size() - toremove);
+        const size_t newsize{oldarray->size() - toremove};
+        auto newarray = ContextArray::Create(newsize);
 
         /* Copy the current/old context handles to the new array, excluding the
          * given context.
@@ -273,21 +275,21 @@ bool ALCcontext::deinit()
         /* Store the new context array in the device. Wait for any current mix
          * to finish before deleting the old array.
          */
-        mDevice->mContexts.store(newarray);
-        if(oldarray != &DeviceBase::sEmptyContextArray)
-        {
-            mDevice->waitForMix();
-            delete oldarray;
-        }
+        auto prevarray = mDevice->mContexts.exchange(std::move(newarray));
+        std::ignore = mDevice->waitForMix();
 
-        ret = !newarray->empty();
+        stopPlayback = (newsize == 0);
     }
     else
-        ret = !oldarray->empty();
+        stopPlayback = oldarray->empty();
 
     StopEventThrd(this);
 
-    return ret;
+    if(stopPlayback && mALDevice->mDeviceState == DeviceState::Playing)
+    {
+        mALDevice->Backend->stop();
+        mALDevice->mDeviceState = DeviceState::Configured;
+    }
 }
 
 void ALCcontext::applyAllUpdates()
@@ -328,10 +330,10 @@ void ForEachSource(ALCcontext *context, F func)
         uint64_t usemask{~sublist.FreeMask};
         while(usemask)
         {
-            const int idx{al::countr_zero(usemask)};
+            const auto idx = static_cast<uint>(al::countr_zero(usemask));
             usemask &= ~(1_u64 << idx);
 
-            func(sublist.Sources[idx]);
+            func((*sublist.Sources)[idx]);
         }
     }
 }
@@ -576,7 +578,7 @@ void ALCcontext::eax_update_speaker_configuration()
 
 void ALCcontext::eax_set_last_error_defaults() noexcept
 {
-    mEaxLastError = EAX_OK;
+    mEaxLastError = EAXCONTEXT_DEFAULTLASTERROR;
 }
 
 void ALCcontext::eax_session_set_defaults() noexcept
@@ -665,6 +667,7 @@ void ALCcontext::eax_get_misc(const EaxCall& call)
         break;
     case EAXCONTEXT_LASTERROR:
         call.set_value<ContextException>(mEaxLastError);
+        mEaxLastError = EAX_OK;
         break;
     case EAXCONTEXT_SPEAKERCONFIG:
         call.set_value<ContextException>(mEaxSpeakerConfig);
@@ -1035,6 +1038,7 @@ try
 }
 catch(...)
 {
+    context->eaxSetLastError();
     eax_log_exception(__func__);
     return AL_INVALID_OPERATION;
 }
@@ -1062,6 +1066,7 @@ try
 }
 catch(...)
 {
+    context->eaxSetLastError();
     eax_log_exception(__func__);
     return AL_INVALID_OPERATION;
 }
