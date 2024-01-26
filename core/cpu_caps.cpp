@@ -17,6 +17,7 @@
 #include <intrin.h>
 #endif
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <string>
@@ -32,7 +33,7 @@ using reg_type = unsigned int;
 inline std::array<reg_type,4> get_cpuid(unsigned int f)
 {
     std::array<reg_type,4> ret{};
-    __get_cpuid(f, &ret[0], &ret[1], &ret[2], &ret[3]);
+    __get_cpuid(f, ret.data(), &ret[1], &ret[2], &ret[3]);
     return ret;
 }
 #define CAN_GET_CPUID
@@ -50,14 +51,14 @@ inline std::array<reg_type,4> get_cpuid(unsigned int f)
 
 } // namespace
 
-al::optional<CPUInfo> GetCPUInfo()
+std::optional<CPUInfo> GetCPUInfo()
 {
     CPUInfo ret;
 
 #ifdef CAN_GET_CPUID
     auto cpuregs = get_cpuid(0);
     if(cpuregs[0] == 0)
-        return al::nullopt;
+        return std::nullopt;
 
     const reg_type maxfunc{cpuregs[0]};
 

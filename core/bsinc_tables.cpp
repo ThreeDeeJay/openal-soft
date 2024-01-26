@@ -5,18 +5,62 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 
 #include "alnumbers.h"
-#include "core/mixer/defs.h"
+#include "alnumeric.h"
+#include "bsinc_defs.h"
+#include "resampler_limits.h"
 
 
 namespace {
 
 using uint = unsigned int;
 
+#if __cpp_lib_math_special_functions >= 201603L
+using std::cyl_bessel_i;
+
+#else
+
+/* The zero-order modified Bessel function of the first kind, used for the
+ * Kaiser window.
+ *
+ *   I_0(x) = sum_{k=0}^inf (1 / k!)^2 (x / 2)^(2 k)
+ *          = sum_{k=0}^inf ((x / 2)^k / k!)^2
+ *
+ * This implementation only handles nu = 0, and isn't the most precise (it
+ * starts with the largest value and accumulates successively smaller values,
+ * compounding the rounding and precision error), but it's good enough.
+ */
+template<typename T, typename U>
+U cyl_bessel_i(T nu, U x)
+{
+    if(nu != T{0})
+        throw std::runtime_error{"cyl_bessel_i: nu != 0"};
+
+    /* Start at k=1 since k=0 is trivial. */
+    const double x2{x/2.0};
+    double term{1.0};
+    double sum{1.0};
+    int k{1};
+
+    /* Let the integration converge until the term of the sum is no longer
+     * significant.
+     */
+    double last_sum{};
+    do {
+        const double y{x2 / k};
+        ++k;
+        last_sum = sum;
+        term *= y * y;
+        sum += term;
+    } while(sum != last_sum);
+    return static_cast<U>(sum);
+}
+#endif
 
 /* This is the normalized cardinal sine (sinc) function.
  *
@@ -29,35 +73,6 @@ constexpr double Sinc(const double x)
     if(!(x > epsilon || x < -epsilon))
         return 1.0;
     return std::sin(al::numbers::pi*x) / (al::numbers::pi*x);
-}
-
-/* The zero-order modified Bessel function of the first kind, used for the
- * Kaiser window.
- *
- *   I_0(x) = sum_{k=0}^inf (1 / k!)^2 (x / 2)^(2 k)
- *          = sum_{k=0}^inf ((x / 2)^k / k!)^2
- */
-constexpr double BesselI_0(const double x) noexcept
-{
-    /* Start at k=1 since k=0 is trivial. */
-    const double x2{x / 2.0};
-    double term{1.0};
-    double sum{1.0};
-    double last_sum{};
-    int k{1};
-
-    /* Let the integration converge until the term of the sum is no longer
-     * significant.
-     */
-    do {
-        const double y{x2 / k};
-        ++k;
-        last_sum = sum;
-        term *= y * y;
-        sum += term;
-    } while(sum != last_sum);
-
-    return sum;
 }
 
 /* Calculate a Kaiser window from the given beta value and a normalized k
@@ -78,7 +93,7 @@ constexpr double Kaiser(const double beta, const double k, const double besseli_
 {
     if(!(k >= -1.0 && k <= 1.0))
         return 0.0;
-    return BesselI_0(beta * std::sqrt(1.0 - k*k)) / besseli_0_beta;
+    return cyl_bessel_i(0, beta * std::sqrt(1.0 - k*k)) / besseli_0_beta;
 }
 
 /* Calculates the (normalized frequency) transition width of the Kaiser window.
@@ -107,24 +122,18 @@ struct BSincHeader {
     double width{};
     double beta{};
     double scaleBase{};
-    double scaleRange{};
-    double besseli_0_beta{};
 
-    uint a[BSincScaleCount]{};
+    std::array<uint,BSincScaleCount> a{};
     uint total_size{};
 
     constexpr BSincHeader(uint Rejection, uint Order) noexcept
+        : width{CalcKaiserWidth(Rejection, Order)}, beta{CalcKaiserBeta(Rejection)}
+        , scaleBase{width / 2.0}
     {
-        width = CalcKaiserWidth(Rejection, Order);
-        beta = CalcKaiserBeta(Rejection);
-        scaleBase = width / 2.0;
-        scaleRange = 1.0 - scaleBase;
-        besseli_0_beta = BesselI_0(beta);
-
         uint num_points{Order+1};
         for(uint si{0};si < BSincScaleCount;++si)
         {
-            const double scale{scaleBase + (scaleRange * (si+1) / BSincScaleCount)};
+            const double scale{lerpd(scaleBase, 1.0, (si+1) / double{BSincScaleCount})};
             const uint a_{std::min(static_cast<uint>(num_points / 2.0 / scale), num_points)};
             const uint m{2 * a_};
 
@@ -142,26 +151,6 @@ constexpr BSincHeader bsinc12_hdr{60, 11};
 constexpr BSincHeader bsinc24_hdr{60, 23};
 
 
-/* NOTE: GCC 5 has an issue with BSincHeader objects being in an anonymous
- * namespace while also being used as non-type template parameters.
- */
-#if !defined(__clang__) && defined(__GNUC__) && __GNUC__ < 6
-
-/* The number of sample points is double the a value (rounded up to a multiple
- * of 4), and scale index 0 includes the doubling for downsampling. bsinc24 is
- * currently the highest quality filter, and will use the most sample points.
- */
-constexpr uint BSincPointsMax{(bsinc24_hdr.a[0]*2 + 3) & ~3u};
-static_assert(BSincPointsMax <= MaxResamplerPadding, "MaxResamplerPadding is too small");
-
-template<size_t total_size>
-struct BSincFilterArray {
-    alignas(16) std::array<float, total_size> mTable;
-    const BSincHeader &hdr;
-
-    BSincFilterArray(const BSincHeader &hdr_) : hdr{hdr_}
-    {
-#else
 template<const BSincHeader &hdr>
 struct BSincFilterArray {
     alignas(16) std::array<float, hdr.total_size> mTable{};
@@ -170,9 +159,12 @@ struct BSincFilterArray {
     {
         constexpr uint BSincPointsMax{(hdr.a[0]*2 + 3) & ~3u};
         static_assert(BSincPointsMax <= MaxResamplerPadding, "MaxResamplerPadding is too small");
-#endif
-        using filter_type = double[BSincPhaseCount+1][BSincPointsMax];
-        auto filter = std::make_unique<filter_type[]>(BSincScaleCount);
+
+        using filter_type = std::array<std::array<double,BSincPointsMax>,BSincPhaseCount+1>;
+        auto filterptr = std::make_unique<std::array<filter_type,BSincScaleCount>>();
+        const auto filter = filterptr->begin();
+
+        const double besseli_0_beta{cyl_bessel_i(0, hdr.beta)};
 
         /* Calculate the Kaiser-windowed Sinc filter coefficients for each
          * scale and phase index.
@@ -181,7 +173,7 @@ struct BSincFilterArray {
         {
             const uint m{hdr.a[si] * 2};
             const size_t o{(BSincPointsMax-m) / 2};
-            const double scale{hdr.scaleBase + (hdr.scaleRange * (si+1) / BSincScaleCount)};
+            const double scale{lerpd(hdr.scaleBase, 1.0, (si+1) / double{BSincScaleCount})};
             const double cutoff{scale - (hdr.scaleBase * std::max(1.0, scale*2.0))};
             const auto a = static_cast<double>(hdr.a[si]);
             const double l{a - 1.0/BSincPhaseCount};
@@ -196,7 +188,7 @@ struct BSincFilterArray {
                 for(uint i{0};i < m;++i)
                 {
                     const double x{i - phase};
-                    filter[si][pi][o+i] = Kaiser(hdr.beta, x/l, hdr.besseli_0_beta) * cutoff *
+                    filter[si][pi][o+i] = Kaiser(hdr.beta, x/l, besseli_0_beta) * cutoff *
                         Sinc(cutoff*x);
                 }
             }
@@ -261,17 +253,12 @@ struct BSincFilterArray {
         assert(idx == hdr.total_size);
     }
 
-    constexpr const BSincHeader &getHeader() const noexcept { return hdr; }
-    constexpr const float *getTable() const noexcept { return &mTable.front(); }
+    [[nodiscard]] constexpr auto getHeader() const noexcept -> const BSincHeader& { return hdr; }
+    [[nodiscard]] constexpr auto getTable() const noexcept -> const float* { return mTable.data(); }
 };
 
-#if !defined(__clang__) && defined(__GNUC__) && __GNUC__ < 6
-const BSincFilterArray<bsinc12_hdr.total_size> bsinc12_filter{bsinc12_hdr};
-const BSincFilterArray<bsinc24_hdr.total_size> bsinc24_filter{bsinc24_hdr};
-#else
 const BSincFilterArray<bsinc12_hdr> bsinc12_filter{};
 const BSincFilterArray<bsinc24_hdr> bsinc24_filter{};
-#endif
 
 template<typename T>
 constexpr BSincTable GenerateBSincTable(const T &filter)
@@ -279,7 +266,7 @@ constexpr BSincTable GenerateBSincTable(const T &filter)
     BSincTable ret{};
     const BSincHeader &hdr = filter.getHeader();
     ret.scaleBase = static_cast<float>(hdr.scaleBase);
-    ret.scaleRange = static_cast<float>(1.0 / hdr.scaleRange);
+    ret.scaleRange = static_cast<float>(1.0 / (1.0 - hdr.scaleBase));
     for(size_t i{0};i < BSincScaleCount;++i)
         ret.m[i] = ((hdr.a[i]*2) + 3) & ~3u;
     ret.filterOffset[0] = 0;
@@ -291,5 +278,5 @@ constexpr BSincTable GenerateBSincTable(const T &filter)
 
 } // namespace
 
-const BSincTable bsinc12{GenerateBSincTable(bsinc12_filter)};
-const BSincTable bsinc24{GenerateBSincTable(bsinc24_filter)};
+const BSincTable gBSinc12{GenerateBSincTable(bsinc12_filter)};
+const BSincTable gBSinc24{GenerateBSincTable(bsinc24_filter)};

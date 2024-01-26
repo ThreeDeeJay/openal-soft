@@ -1,17 +1,17 @@
 #ifndef CORE_FMT_TRAITS_H
 #define CORE_FMT_TRAITS_H
 
-#include <stddef.h>
+#include <array>
+#include <cstddef>
 #include <stdint.h>
 
-#include "albyte.h"
 #include "buffer_storage.h"
 
 
 namespace al {
 
-extern const int16_t muLawDecompressionTable[256];
-extern const int16_t aLawDecompressionTable[256];
+extern const std::array<int16_t,256> muLawDecompressionTable;
+extern const std::array<int16_t,256> aLawDecompressionTable;
 
 
 template<FmtType T>
@@ -22,36 +22,43 @@ struct FmtTypeTraits<FmtUByte> {
     using Type = uint8_t;
 
     template<typename OutT>
-    static constexpr inline OutT to(const Type val) noexcept
-    { return val*OutT{1.0/128.0} - OutT{1.0}; }
+    static constexpr OutT to(const Type val) noexcept { return val*OutT{1.0/128.0} - OutT{1.0}; }
 };
 template<>
 struct FmtTypeTraits<FmtShort> {
     using Type = int16_t;
 
     template<typename OutT>
-    static constexpr inline OutT to(const Type val) noexcept { return val*OutT{1.0/32768.0}; }
+    static constexpr OutT to(const Type val) noexcept { return val*OutT{1.0/32768.0}; }
+};
+template<>
+struct FmtTypeTraits<FmtInt> {
+    using Type = int32_t;
+
+    template<typename OutT>
+    static constexpr OutT to(const Type val) noexcept
+    { return static_cast<OutT>(val)*OutT{1.0/2147483648.0}; }
 };
 template<>
 struct FmtTypeTraits<FmtFloat> {
     using Type = float;
 
     template<typename OutT>
-    static constexpr inline OutT to(const Type val) noexcept { return val; }
+    static constexpr OutT to(const Type val) noexcept { return val; }
 };
 template<>
 struct FmtTypeTraits<FmtDouble> {
     using Type = double;
 
     template<typename OutT>
-    static constexpr inline OutT to(const Type val) noexcept { return static_cast<OutT>(val); }
+    static constexpr OutT to(const Type val) noexcept { return static_cast<OutT>(val); }
 };
 template<>
 struct FmtTypeTraits<FmtMulaw> {
     using Type = uint8_t;
 
     template<typename OutT>
-    static constexpr inline OutT to(const Type val) noexcept
+    static constexpr OutT to(const Type val) noexcept
     { return muLawDecompressionTable[val] * OutT{1.0/32768.0}; }
 };
 template<>
@@ -59,14 +66,14 @@ struct FmtTypeTraits<FmtAlaw> {
     using Type = uint8_t;
 
     template<typename OutT>
-    static constexpr inline OutT to(const Type val) noexcept
+    static constexpr OutT to(const Type val) noexcept
     { return aLawDecompressionTable[val] * OutT{1.0/32768.0}; }
 };
 
 
 template<FmtType SrcType, typename DstT>
-inline void LoadSampleArray(DstT *RESTRICT dst, const al::byte *src, const size_t srcstep,
-    const size_t samples) noexcept
+inline void LoadSampleArray(DstT *RESTRICT dst, const std::byte *src, const std::size_t srcstep,
+    const std::size_t samples) noexcept
 {
     using TypeTraits = FmtTypeTraits<SrcType>;
     using SampleType = typename TypeTraits::Type;

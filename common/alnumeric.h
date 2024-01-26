@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #ifdef HAVE_INTRIN_H
 #include <intrin.h>
 #endif
@@ -12,11 +13,28 @@
 #include <xmmintrin.h>
 #endif
 
+#include "albit.h"
+#include "altraits.h"
 #include "opthelpers.h"
 
 
-inline constexpr int64_t operator "" _i64(unsigned long long int n) noexcept { return static_cast<int64_t>(n); }
-inline constexpr uint64_t operator "" _u64(unsigned long long int n) noexcept { return static_cast<uint64_t>(n); }
+constexpr auto operator "" _i64(unsigned long long n) noexcept { return static_cast<int64_t>(n); }
+constexpr auto operator "" _u64(unsigned long long n) noexcept { return static_cast<uint64_t>(n); }
+
+constexpr auto operator "" _z(unsigned long long n) noexcept
+{ return static_cast<std::make_signed_t<size_t>>(n); }
+constexpr auto operator "" _uz(unsigned long long n) noexcept { return static_cast<size_t>(n); }
+constexpr auto operator "" _zu(unsigned long long n) noexcept { return static_cast<size_t>(n); }
+
+
+constexpr auto GetCounterSuffix(size_t count) noexcept -> const char*
+{
+    auto &suffix = (((count%100)/10) == 1) ? "th" :
+        ((count%10) == 1) ? "st" :
+        ((count%10) == 2) ? "nd" :
+        ((count%10) == 3) ? "rd" : "th";
+    return std::data(suffix);
+}
 
 
 constexpr inline float minf(float a, float b) noexcept
@@ -81,6 +99,9 @@ constexpr inline float cubic(float val1, float val2, float val3, float val4, flo
     return val1*a0 + val2*a1 + val3*a2 + val4*a3;
 }
 
+constexpr inline double lerpd(double val1, double val2, double mu) noexcept
+{ return val1 + (val2-val1)*mu; }
+
 
 /** Find the next power-of-2 for non-power-of-2 numbers. */
 inline uint32_t NextPowerOf2(uint32_t value) noexcept
@@ -97,12 +118,20 @@ inline uint32_t NextPowerOf2(uint32_t value) noexcept
     return value+1;
 }
 
-/** Round up a value to the next multiple. */
-inline size_t RoundUp(size_t value, size_t r) noexcept
-{
-    value += r-1;
-    return value - (value%r);
-}
+/**
+ * If the value is not already a multiple of r, round down to the next
+ * multiple.
+ */
+template<typename T>
+constexpr T RoundDown(T value, al::type_identity_t<T> r) noexcept
+{ return value - (value%r); }
+
+/**
+ * If the value is not already a multiple of r, round up to the next multiple.
+ */
+template<typename T>
+constexpr T RoundUp(T value, al::type_identity_t<T> r) noexcept
+{ return RoundDown(value + r-1, r); }
 
 
 /**
@@ -116,21 +145,18 @@ inline int fastf2i(float f) noexcept
 #if defined(HAVE_SSE_INTRINSICS)
     return _mm_cvt_ss2si(_mm_set_ss(f));
 
-#elif defined(_MSC_VER) && defined(_M_IX86_FP)
+#elif defined(_MSC_VER) && defined(_M_IX86_FP) && _M_IX86_FP == 0
 
     int i;
     __asm fld f
     __asm fistp i
     return i;
 
-#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__))
+#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__)) \
+    && !defined(__SSE_MATH__)
 
     int i;
-#ifdef __SSE_MATH__
-    __asm__("cvtss2si %1, %0" : "=r"(i) : "x"(f));
-#else
     __asm__ __volatile__("fistpl %0" : "=m"(i) : "t"(f) : "st");
-#endif
     return i;
 
 #else
@@ -150,22 +176,17 @@ inline int float2int(float f) noexcept
 #elif (defined(_MSC_VER) && defined(_M_IX86_FP) && _M_IX86_FP == 0) \
     || ((defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__)) \
         && !defined(__SSE_MATH__))
-    int sign, shift, mant;
-    union {
-        float f;
-        int i;
-    } conv;
+    const int conv_i{al::bit_cast<int>(f)};
 
-    conv.f = f;
-    sign = (conv.i>>31) | 1;
-    shift = ((conv.i>>23)&0xff) - (127+23);
+    const int sign{(conv_i>>31) | 1};
+    const int shift{((conv_i>>23)&0xff) - (127+23)};
 
     /* Over/underflow */
-    if(shift >= 31 || shift < -23) [[unlikely]]
+    if(shift >= 31 || shift < -23) UNLIKELY
         return 0;
 
-    mant = (conv.i&0x7fffff) | 0x800000;
-    if(shift < 0) [[likely]]
+    const int mant{(conv_i&0x7fffff) | 0x800000};
+    if(shift < 0) LIKELY
         return (mant >> -shift) * sign;
     return (mant << shift) * sign;
 
@@ -186,25 +207,19 @@ inline int double2int(double d) noexcept
 #elif (defined(_MSC_VER) && defined(_M_IX86_FP) && _M_IX86_FP < 2) \
     || ((defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__)) \
         && !defined(__SSE2_MATH__))
-    int sign, shift;
-    int64_t mant;
-    union {
-        double d;
-        int64_t i64;
-    } conv;
+    const int64_t conv_i64{al::bit_cast<int64_t>(d)};
 
-    conv.d = d;
-    sign = (conv.i64 >> 63) | 1;
-    shift = ((conv.i64 >> 52) & 0x7ff) - (1023 + 52);
+    const int sign{static_cast<int>(conv_i64 >> 63) | 1};
+    const int shift{(static_cast<int>(conv_i64 >> 52) & 0x7ff) - (1023 + 52)};
 
     /* Over/underflow */
-    if(shift >= 63 || shift < -52) [[unlikely]]
+    if(shift >= 63 || shift < -52) UNLIKELY
         return 0;
 
-    mant = (conv.i64 & 0xfffffffffffff_i64) | 0x10000000000000_i64;
-    if(shift < 0) [[likely]]
-        return (int)(mant >> -shift) * sign;
-    return (int)(mant << shift) * sign;
+    const int64_t mant{(conv_i64 & 0xfffffffffffff_i64) | 0x10000000000000_i64};
+    if(shift < 0) LIKELY
+        return static_cast<int>(mant >> -shift) * sign;
+    return static_cast<int>(mant << shift) * sign;
 
 #else
 
@@ -237,21 +252,16 @@ inline float fast_roundf(float f) noexcept
     /* Integral limit, where sub-integral precision is not available for
      * floats.
      */
-    static const float ilim[2]{
+    static constexpr std::array ilim{
          8388608.0f /*  0x1.0p+23 */,
         -8388608.0f /* -0x1.0p+23 */
     };
-    unsigned int sign, expo;
-    union {
-        float f;
-        unsigned int i;
-    } conv;
+    const unsigned int conv_i{al::bit_cast<unsigned int>(f)};
 
-    conv.f = f;
-    sign = (conv.i>>31)&0x01;
-    expo = (conv.i>>23)&0xff;
+    const unsigned int sign{(conv_i>>31)&0x01};
+    const unsigned int expo{(conv_i>>23)&0xff};
 
-    if(expo >= 150/*+23*/) [[unlikely]]
+    if(expo >= 150/*+23*/) UNLIKELY
     {
         /* An exponent (base-2) of 23 or higher is incapable of sub-integral
          * precision, so it's already an integral value. We don't need to worry
@@ -266,19 +276,17 @@ inline float fast_roundf(float f) noexcept
      * optimize this out because of non-associative rules on floating-point
      * math (as long as you don't use -fassociative-math,
      * -funsafe-math-optimizations, -ffast-math, or -Ofast, in which case this
-     * may break).
+     * may break without __builtin_assoc_barrier support).
      */
+#if HAS_BUILTIN(__builtin_assoc_barrier)
+    return __builtin_assoc_barrier(f + ilim[sign]) - ilim[sign];
+#else
     f += ilim[sign];
     return f - ilim[sign];
 #endif
+#endif
 }
 
-
-template<typename T>
-constexpr const T& clamp(const T& value, const T& min_value, const T& max_value) noexcept
-{
-    return std::min(std::max(value, min_value), max_value);
-}
 
 // Converts level (mB) to gain.
 inline float level_mb_to_gain(float x)

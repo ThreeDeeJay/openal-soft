@@ -5,84 +5,54 @@
 #include <cstddef>
 #include <initializer_list>
 #include <iterator>
+#include <stdexcept>
 #include <type_traits>
 
 #include "almalloc.h"
+#include "altraits.h"
 
 namespace al {
 
-template<typename T>
-constexpr auto size(const T &cont) noexcept(noexcept(cont.size())) -> decltype(cont.size())
-{ return cont.size(); }
-
-template<typename T, size_t N>
-constexpr size_t size(const T (&)[N]) noexcept
-{ return N; }
-
-
-template<typename T>
-constexpr auto data(T &cont) noexcept(noexcept(cont.data())) -> decltype(cont.data())
-{ return cont.data(); }
-
-template<typename T>
-constexpr auto data(const T &cont) noexcept(noexcept(cont.data())) -> decltype(cont.data())
-{ return cont.data(); }
-
-template<typename T, size_t N>
-constexpr T* data(T (&arr)[N]) noexcept
-{ return arr; }
-
-template<typename T>
-constexpr const T* data(std::initializer_list<T> list) noexcept
-{ return list.begin(); }
-
-
-template<typename T>
-struct type_identity { using type = T; };
-
-template<typename T>
-using type_identity_t = typename type_identity<T>::type;
-
-
-constexpr size_t dynamic_extent{static_cast<size_t>(-1)};
+inline constexpr size_t dynamic_extent{static_cast<size_t>(-1)};
 
 template<typename T, size_t E=dynamic_extent>
 class span;
 
 namespace detail_ {
-    template<typename... Ts>
-    using void_t = void;
-
     template<typename T>
     struct is_span_ : std::false_type { };
     template<typename T, size_t E>
     struct is_span_<span<T,E>> : std::true_type { };
     template<typename T>
-    constexpr bool is_span_v = is_span_<std::remove_cv_t<T>>::value;
+    inline constexpr bool is_span_v = is_span_<std::remove_cv_t<T>>::value;
 
     template<typename T>
     struct is_std_array_ : std::false_type { };
     template<typename T, size_t N>
     struct is_std_array_<std::array<T,N>> : std::true_type { };
     template<typename T>
-    constexpr bool is_std_array_v = is_std_array_<std::remove_cv_t<T>>::value;
+    inline constexpr bool is_std_array_v = is_std_array_<std::remove_cv_t<T>>::value;
 
     template<typename T, typename = void>
-    constexpr bool has_size_and_data = false;
+    inline constexpr bool has_size_and_data = false;
     template<typename T>
-    constexpr bool has_size_and_data<T,
-        void_t<decltype(al::size(std::declval<T>())), decltype(al::data(std::declval<T>()))>>
+    inline constexpr bool has_size_and_data<T,
+        std::void_t<decltype(std::size(std::declval<T>())),decltype(std::data(std::declval<T>()))>>
         = true;
 
+    template<typename C>
+    inline constexpr bool is_valid_container_type = !is_span_v<C> && !is_std_array_v<C>
+        && !std::is_array<C>::value && has_size_and_data<C>;
+
     template<typename T, typename U>
-    constexpr bool is_convertible_v = std::is_convertible<T(*)[],U(*)[]>::value;
+    inline constexpr bool is_array_compatible = std::is_convertible<T(*)[],U(*)[]>::value; /* NOLINT(*-avoid-c-arrays) */
+
+    template<typename C, typename T>
+    inline constexpr bool is_valid_container = is_valid_container_type<C>
+        && is_array_compatible<std::remove_pointer_t<decltype(std::data(std::declval<C&>()))>,T>;
 } // namespace detail_
 
 #define REQUIRES(...) std::enable_if_t<(__VA_ARGS__),bool> = true
-#define IS_VALID_CONTAINER(C, T)                                              \
-    !detail_::is_span_v<C> && !detail_::is_std_array_v<C> &&                  \
-    !std::is_array<C>::value && detail_::has_size_and_data<C> &&              \
-    detail_::is_convertible_v<std::remove_pointer_t<decltype(al::data(std::declval<C&>()))>,T>
 
 template<typename T, size_t E>
 class span {
@@ -107,71 +77,74 @@ public:
     template<bool is0=(extent == 0), REQUIRES(is0)>
     constexpr span() noexcept { }
     template<typename U>
-    constexpr explicit span(U iter, index_type) : mData{to_address(iter)} { }
-    template<typename U, typename V, REQUIRES(!std::is_integral<V>::value)>
-    constexpr explicit span(U first, V) : mData{to_address(first)} { }
-
-    constexpr span(type_identity_t<element_type> (&arr)[E]) noexcept
-        : span{al::data(arr), al::size(arr)}
+    constexpr explicit span(U iter, index_type) : mData{::al::to_address(iter)} { }
+    template<typename U, typename V, REQUIRES(!std::is_convertible<V,size_t>::value)>
+    constexpr explicit span(U first, V) : mData{::al::to_address(first)}
     { }
-    constexpr span(std::array<value_type,E> &arr) noexcept : span{al::data(arr), al::size(arr)} { }
+
+    constexpr span(type_identity_t<element_type> (&arr)[E]) noexcept /* NOLINT(*-avoid-c-arrays) */
+        : span{std::data(arr), std::size(arr)}
+    { }
+    constexpr span(std::array<value_type,E> &arr) noexcept
+        : span{std::data(arr), std::size(arr)}
+    { }
     template<typename U=T, REQUIRES(std::is_const<U>::value)>
     constexpr span(const std::array<value_type,E> &arr) noexcept
-      : span{al::data(arr), al::size(arr)}
+      : span{std::data(arr), std::size(arr)}
     { }
 
-    template<typename U, REQUIRES(IS_VALID_CONTAINER(U, element_type))>
-    constexpr explicit span(U&& cont) : span{al::data(cont), al::size(cont)} { }
+    template<typename U, REQUIRES(detail_::is_valid_container<U, element_type>)>
+    constexpr explicit span(U&& cont) : span{std::data(cont), std::size(cont)} { }
 
     template<typename U, index_type N, REQUIRES(!std::is_same<element_type,U>::value
-        && detail_::is_convertible_v<U,element_type> && N == dynamic_extent)>
+        && detail_::is_array_compatible<U,element_type> && N == dynamic_extent)>
     constexpr explicit span(const span<U,N> &span_) noexcept
-        : span{al::data(span_), al::size(span_)}
+        : span{std::data(span_), std::size(span_)}
     { }
     template<typename U, index_type N, REQUIRES(!std::is_same<element_type,U>::value
-        && detail_::is_convertible_v<U,element_type> && N == extent)>
-    constexpr span(const span<U,N> &span_) noexcept : span{al::data(span_), al::size(span_)} { }
+        && detail_::is_array_compatible<U,element_type> && N == extent)>
+    constexpr span(const span<U,N> &span_) noexcept : span{std::data(span_), std::size(span_)} { }
     constexpr span(const span&) noexcept = default;
 
     constexpr span& operator=(const span &rhs) noexcept = default;
 
-    constexpr reference front() const { return *mData; }
-    constexpr reference back() const { return *(mData+E-1); }
-    constexpr reference operator[](index_type idx) const { return mData[idx]; }
-    constexpr pointer data() const noexcept { return mData; }
+    [[nodiscard]] constexpr auto front() const -> reference { return mData[0]; }
+    [[nodiscard]] constexpr auto back() const -> reference { return mData[E-1]; }
+    [[nodiscard]] constexpr auto operator[](index_type idx) const -> reference { return mData[idx]; }
+    [[nodiscard]] constexpr auto data() const noexcept -> pointer { return mData; }
 
-    constexpr index_type size() const noexcept { return E; }
-    constexpr index_type size_bytes() const noexcept { return E * sizeof(value_type); }
-    constexpr bool empty() const noexcept { return E == 0; }
+    [[nodiscard]] constexpr auto size() const noexcept -> index_type { return E; }
+    [[nodiscard]] constexpr auto size_bytes() const noexcept -> index_type { return E * sizeof(value_type); }
+    [[nodiscard]] constexpr auto empty() const noexcept -> bool { return E == 0; }
 
-    constexpr iterator begin() const noexcept { return mData; }
-    constexpr iterator end() const noexcept { return mData+E; }
-    constexpr const_iterator cbegin() const noexcept { return mData; }
-    constexpr const_iterator cend() const noexcept { return mData+E; }
+    [[nodiscard]] constexpr auto begin() const noexcept -> iterator { return mData; }
+    [[nodiscard]] constexpr auto end() const noexcept -> iterator { return mData+E; }
+    [[nodiscard]] constexpr auto cbegin() const noexcept -> const_iterator { return mData; }
+    [[nodiscard]] constexpr auto cend() const noexcept -> const_iterator { return mData+E; }
 
-    constexpr reverse_iterator rbegin() const noexcept { return reverse_iterator{end()}; }
-    constexpr reverse_iterator rend() const noexcept { return reverse_iterator{begin()}; }
-    constexpr const_reverse_iterator crbegin() const noexcept
+    [[nodiscard]] constexpr auto rbegin() const noexcept -> reverse_iterator { return reverse_iterator{end()}; }
+    [[nodiscard]] constexpr auto rend() const noexcept -> reverse_iterator { return reverse_iterator{begin()}; }
+    [[nodiscard]] constexpr auto crbegin() const noexcept -> const_reverse_iterator
     { return const_reverse_iterator{cend()}; }
-    constexpr const_reverse_iterator crend() const noexcept
+    [[nodiscard]] constexpr auto crend() const noexcept -> const_reverse_iterator
     { return const_reverse_iterator{cbegin()}; }
 
     template<size_t C>
-    constexpr span<element_type,C> first() const
+    [[nodiscard]] constexpr auto first() const -> span<element_type,C>
     {
         static_assert(E >= C, "New size exceeds original capacity");
         return span<element_type,C>{mData, C};
     }
 
     template<size_t C>
-    constexpr span<element_type,C> last() const
+    [[nodiscard]] constexpr auto last() const -> span<element_type,C>
     {
         static_assert(E >= C, "New size exceeds original capacity");
         return span<element_type,C>{mData+(E-C), C};
     }
 
     template<size_t O, size_t C>
-    constexpr auto subspan() const -> std::enable_if_t<C!=dynamic_extent,span<element_type,C>>
+    [[nodiscard]] constexpr auto subspan() const -> std::enable_if_t<C!=dynamic_extent,span<element_type,C>>
     {
         static_assert(E >= O, "Offset exceeds extent");
         static_assert(E-O >= C, "New size exceeds original capacity");
@@ -179,7 +152,7 @@ public:
     }
 
     template<size_t O, size_t C=dynamic_extent>
-    constexpr auto subspan() const -> std::enable_if_t<C==dynamic_extent,span<element_type,E-O>>
+    [[nodiscard]] constexpr auto subspan() const -> std::enable_if_t<C==dynamic_extent,span<element_type,E-O>>
     {
         static_assert(E >= O, "Offset exceeds extent");
         return span<element_type,E-O>{mData+O, E-O};
@@ -189,10 +162,10 @@ public:
      * defining the specialization. As a result, these methods need to be
      * defined later.
      */
-    constexpr span<element_type,dynamic_extent> first(size_t count) const;
-    constexpr span<element_type,dynamic_extent> last(size_t count) const;
-    constexpr span<element_type,dynamic_extent> subspan(size_t offset,
-        size_t count=dynamic_extent) const;
+    [[nodiscard]] constexpr auto first(size_t count) const -> span<element_type,dynamic_extent>;
+    [[nodiscard]] constexpr auto last(size_t count) const -> span<element_type,dynamic_extent>;
+    [[nodiscard]] constexpr auto subspan(size_t offset,
+        size_t count=dynamic_extent) const -> span<element_type,dynamic_extent>;
 
 private:
     pointer mData{nullptr};
@@ -220,140 +193,169 @@ public:
 
     constexpr span() noexcept = default;
     template<typename U>
-    constexpr span(U iter, index_type count)
-        : mData{to_address(iter)}, mDataEnd{to_address(iter)+count}
+    constexpr span(U iter, index_type count) : mData{::al::to_address(iter)}, mDataLength{count}
     { }
-    template<typename U, typename V, REQUIRES(!std::is_integral<V>::value)>
-    constexpr span(U first, V last)
-        : mData{to_address(first)}, mDataEnd{to_address(last)}
+    template<typename U, typename V, REQUIRES(!std::is_convertible<V,size_t>::value)>
+    constexpr span(U first, V last) : span{::al::to_address(first), static_cast<size_t>(last - first)}
     { }
 
     template<size_t N>
-    constexpr span(type_identity_t<element_type> (&arr)[N]) noexcept
-        : span{al::data(arr), al::size(arr)}
+    constexpr span(type_identity_t<element_type> (&arr)[N]) noexcept /* NOLINT(*-avoid-c-arrays) */
+        : span{std::data(arr), std::size(arr)}
     { }
     template<size_t N>
-    constexpr span(std::array<value_type,N> &arr) noexcept : span{al::data(arr), al::size(arr)} { }
+    constexpr span(std::array<value_type,N> &arr) noexcept
+        : span{std::data(arr), std::size(arr)}
+    { }
     template<size_t N, typename U=T, REQUIRES(std::is_const<U>::value)>
     constexpr span(const std::array<value_type,N> &arr) noexcept
-      : span{al::data(arr), al::size(arr)}
+      : span{std::data(arr), std::size(arr)}
     { }
 
-    template<typename U, REQUIRES(IS_VALID_CONTAINER(U, element_type))>
-    constexpr span(U&& cont) : span{al::data(cont), al::size(cont)} { }
+    template<typename U, REQUIRES(detail_::is_valid_container<U, element_type>)>
+    constexpr span(U&& cont) : span{std::data(cont), std::size(cont)} { }
 
     template<typename U, size_t N, REQUIRES((!std::is_same<element_type,U>::value || extent != N)
-        && detail_::is_convertible_v<U,element_type>)>
-    constexpr span(const span<U,N> &span_) noexcept : span{al::data(span_), al::size(span_)} { }
+        && detail_::is_array_compatible<U,element_type>)>
+    constexpr span(const span<U,N> &span_) noexcept : span{std::data(span_), std::size(span_)} { }
     constexpr span(const span&) noexcept = default;
 
     constexpr span& operator=(const span &rhs) noexcept = default;
 
-    constexpr reference front() const { return *mData; }
-    constexpr reference back() const { return *(mDataEnd-1); }
-    constexpr reference operator[](index_type idx) const { return mData[idx]; }
-    constexpr pointer data() const noexcept { return mData; }
+    [[nodiscard]] constexpr auto front() const -> reference { return mData[0]; }
+    [[nodiscard]] constexpr auto back() const -> reference { return mData[mDataLength-1]; }
+    [[nodiscard]] constexpr auto operator[](index_type idx) const -> reference { return mData[idx]; }
+    [[nodiscard]] constexpr auto data() const noexcept -> pointer { return mData; }
 
-    constexpr index_type size() const noexcept { return static_cast<index_type>(mDataEnd-mData); }
-    constexpr index_type size_bytes() const noexcept
-    { return static_cast<index_type>(mDataEnd-mData) * sizeof(value_type); }
-    constexpr bool empty() const noexcept { return mData == mDataEnd; }
+    [[nodiscard]] constexpr auto size() const noexcept -> index_type { return mDataLength; }
+    [[nodiscard]] constexpr auto size_bytes() const noexcept -> index_type { return mDataLength * sizeof(value_type); }
+    [[nodiscard]] constexpr auto empty() const noexcept -> bool { return mDataLength == 0; }
 
-    constexpr iterator begin() const noexcept { return mData; }
-    constexpr iterator end() const noexcept { return mDataEnd; }
-    constexpr const_iterator cbegin() const noexcept { return mData; }
-    constexpr const_iterator cend() const noexcept { return mDataEnd; }
+    [[nodiscard]] constexpr auto begin() const noexcept -> iterator { return mData; }
+    [[nodiscard]] constexpr auto end() const noexcept -> iterator { return mData+mDataLength; }
+    [[nodiscard]] constexpr auto cbegin() const noexcept -> const_iterator { return mData; }
+    [[nodiscard]] constexpr auto cend() const noexcept -> const_iterator { return mData+mDataLength; }
 
-    constexpr reverse_iterator rbegin() const noexcept { return reverse_iterator{end()}; }
-    constexpr reverse_iterator rend() const noexcept { return reverse_iterator{begin()}; }
-    constexpr const_reverse_iterator crbegin() const noexcept
+    [[nodiscard]] constexpr auto rbegin() const noexcept -> reverse_iterator { return reverse_iterator{end()}; }
+    [[nodiscard]] constexpr auto rend() const noexcept -> reverse_iterator { return reverse_iterator{begin()}; }
+    [[nodiscard]] constexpr auto crbegin() const noexcept -> const_reverse_iterator
     { return const_reverse_iterator{cend()}; }
-    constexpr const_reverse_iterator crend() const noexcept
+    [[nodiscard]] constexpr auto crend() const noexcept -> const_reverse_iterator
     { return const_reverse_iterator{cbegin()}; }
 
     template<size_t C>
-    constexpr span<element_type,C> first() const
-    { return span<element_type,C>{mData, C}; }
+    [[nodiscard]] constexpr auto first() const -> span<element_type,C>
+    {
+        if(C > mDataLength)
+            throw std::out_of_range{"Subspan count out of range"};
+        return span<element_type,C>{mData, C};
+    }
 
-    constexpr span first(size_t count) const
-    { return (count >= size()) ? *this : span{mData, mData+count}; }
+    [[nodiscard]] constexpr auto first(size_t count) const -> span
+    {
+        if(count > mDataLength)
+            throw std::out_of_range{"Subspan count out of range"};
+        return span{mData, count};
+    }
 
     template<size_t C>
-    constexpr span<element_type,C> last() const
-    { return span<element_type,C>{mDataEnd-C, C}; }
+    [[nodiscard]] constexpr auto last() const -> span<element_type,C>
+    {
+        if(C > mDataLength)
+            throw std::out_of_range{"Subspan count out of range"};
+        return span<element_type,C>{mData+mDataLength-C, C};
+    }
 
-    constexpr span last(size_t count) const
-    { return (count >= size()) ? *this : span{mDataEnd-count, mDataEnd}; }
+    [[nodiscard]] constexpr auto last(size_t count) const -> span
+    {
+        if(count > mDataLength)
+            throw std::out_of_range{"Subspan count out of range"};
+        return span{mData+mDataLength-count, count};
+    }
 
     template<size_t O, size_t C>
-    constexpr auto subspan() const -> std::enable_if_t<C!=dynamic_extent,span<element_type,C>>
-    { return span<element_type,C>{mData+O, C}; }
+    [[nodiscard]] constexpr auto subspan() const -> std::enable_if_t<C!=dynamic_extent,span<element_type,C>>
+    {
+        if(O > mDataLength)
+            throw std::out_of_range{"Subspan offset out of range"};
+        if(C > mDataLength-O)
+            throw std::out_of_range{"Subspan length out of range"};
+        return span<element_type,C>{mData+O, C};
+    }
 
     template<size_t O, size_t C=dynamic_extent>
-    constexpr auto subspan() const -> std::enable_if_t<C==dynamic_extent,span<element_type,C>>
-    { return span<element_type,C>{mData+O, mDataEnd}; }
-
-    constexpr span subspan(size_t offset, size_t count=dynamic_extent) const
+    [[nodiscard]] constexpr auto subspan() const -> std::enable_if_t<C==dynamic_extent,span<element_type,C>>
     {
-        return (offset > size()) ? span{} :
-            (count >= size()-offset) ? span{mData+offset, mDataEnd} :
-            span{mData+offset, mData+offset+count};
+        if(O > mDataLength)
+            throw std::out_of_range{"Subspan offset out of range"};
+        return span<element_type,C>{mData+O, mDataLength-O};
+    }
+
+    [[nodiscard]] constexpr auto subspan(size_t offset, size_t count=dynamic_extent) const -> span
+    {
+        if(offset > mDataLength)
+            throw std::out_of_range{"Subspan offset out of range"};
+        if(count != dynamic_extent)
+        {
+            if(count > mDataLength-offset)
+                throw std::out_of_range{"Subspan length out of range"};
+            return span{mData+offset, count};
+        }
+        return span{mData+offset, mDataLength-offset};
     }
 
 private:
     pointer mData{nullptr};
-    pointer mDataEnd{nullptr};
+    index_type mDataLength{0};
 };
 
 template<typename T, size_t E>
-constexpr inline auto span<T,E>::first(size_t count) const -> span<element_type,dynamic_extent>
+[[nodiscard]] constexpr inline auto span<T,E>::first(size_t count) const -> span<element_type,dynamic_extent>
 {
-    return (count >= size()) ? span<element_type>{mData, extent} :
-        span<element_type>{mData, count};
+    if(count > size())
+        throw std::out_of_range{"Subspan count out of range"};
+    return span<element_type>{mData, count};
 }
 
 template<typename T, size_t E>
-constexpr inline auto span<T,E>::last(size_t count) const -> span<element_type,dynamic_extent>
+[[nodiscard]] constexpr inline auto span<T,E>::last(size_t count) const -> span<element_type,dynamic_extent>
 {
-    return (count >= size()) ? span<element_type>{mData, extent} :
-        span<element_type>{mData+extent-count, count};
+    if(count > size())
+        throw std::out_of_range{"Subspan count out of range"};
+    return span<element_type>{mData+size()-count, count};
 }
 
 template<typename T, size_t E>
-constexpr inline auto span<T,E>::subspan(size_t offset, size_t count) const
+[[nodiscard]] constexpr inline auto span<T,E>::subspan(size_t offset, size_t count) const
     -> span<element_type,dynamic_extent>
 {
-    return (offset > size()) ? span<element_type>{} :
-        (count >= size()-offset) ? span<element_type>{mData+offset, mData+extent} :
-        span<element_type>{mData+offset, mData+offset+count};
+    if(offset > size())
+        throw std::out_of_range{"Subspan offset out of range"};
+    if(count != dynamic_extent)
+    {
+        if(count > size()-offset)
+            throw std::out_of_range{"Subspan length out of range"};
+        return span{mData+offset, count};
+    }
+    return span{mData+offset, size()-offset};
 }
 
-/* Helpers to deal with the lack of user-defined deduction guides (C++17). */
-template<typename T, typename U>
-constexpr auto as_span(T ptr, U count_or_end)
-{
-    using value_type = typename std::pointer_traits<T>::element_type;
-    return span<value_type>{ptr, count_or_end};
-}
-template<typename T, size_t N>
-constexpr auto as_span(T (&arr)[N]) noexcept { return span<T,N>{al::data(arr), al::size(arr)}; }
-template<typename T, size_t N>
-constexpr auto as_span(std::array<T,N> &arr) noexcept
-{ return span<T,N>{al::data(arr), al::size(arr)}; }
-template<typename T, size_t N>
-constexpr auto as_span(const std::array<T,N> &arr) noexcept
-{ return span<std::add_const_t<T>,N>{al::data(arr), al::size(arr)}; }
-template<typename U, REQUIRES(!detail_::is_span_v<U> && !detail_::is_std_array_v<U>
-    && !std::is_array<U>::value && detail_::has_size_and_data<U>)>
-constexpr auto as_span(U&& cont)
-{
-    using value_type = std::remove_pointer_t<decltype(al::data(std::declval<U&>()))>;
-    return span<value_type>{al::data(cont), al::size(cont)};
-}
-template<typename T, size_t N>
-constexpr auto as_span(span<T,N> span_) noexcept { return span_; }
 
-#undef IS_VALID_CONTAINER
+template<typename T, typename EndOrSize>
+span(T, EndOrSize) -> span<std::remove_reference_t<decltype(*std::declval<T&>())>>;
+
+template<typename T, std::size_t N>
+span(T (&)[N]) -> span<T, N>; /* NOLINT(*-avoid-c-arrays) */
+
+template<typename T, std::size_t N>
+span(std::array<T, N>&) -> span<T, N>;
+
+template<typename T, std::size_t N>
+span(const std::array<T, N>&) -> span<const T, N>;
+
+template<typename C, REQUIRES(detail_::is_valid_container_type<C>)>
+span(C&&) -> span<std::remove_pointer_t<decltype(std::data(std::declval<C&>()))>>;
+
 #undef REQUIRES
 
 } // namespace al

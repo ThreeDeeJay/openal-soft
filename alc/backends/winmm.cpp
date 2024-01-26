@@ -22,8 +22,8 @@
 
 #include "winmm.h"
 
-#include <stdlib.h>
-#include <stdio.h>
+#include <cstdlib>
+#include <cstdio>
 #include <memory.h>
 
 #include <windows.h>
@@ -39,12 +39,14 @@
 #include <functional>
 
 #include "alnumeric.h"
+#include "alsem.h"
+#include "althrd_setname.h"
 #include "core/device.h"
 #include "core/helpers.h"
 #include "core/logging.h"
 #include "ringbuffer.h"
 #include "strutils.h"
-#include "threads.h"
+#include "vector.h"
 
 #ifndef WAVE_FORMAT_IEEE_FLOAT
 #define WAVE_FORMAT_IEEE_FLOAT  0x0003
@@ -55,13 +57,13 @@ namespace {
 #define DEVNAME_HEAD "OpenAL Soft on "
 
 
-al::vector<std::string> PlaybackDevices;
-al::vector<std::string> CaptureDevices;
+std::vector<std::string> PlaybackDevices;
+std::vector<std::string> CaptureDevices;
 
-bool checkName(const al::vector<std::string> &list, const std::string &name)
+bool checkName(const std::vector<std::string> &list, const std::string &name)
 { return std::find(list.cbegin(), list.cend(), name) != list.cend(); }
 
-void ProbePlaybackDevices(void)
+void ProbePlaybackDevices()
 {
     PlaybackDevices.clear();
 
@@ -92,7 +94,7 @@ void ProbePlaybackDevices(void)
     }
 }
 
-void ProbeCaptureDevices(void)
+void ProbeCaptureDevices()
 {
     CaptureDevices.clear();
 
@@ -134,7 +136,7 @@ struct WinMMPlayback final : public BackendBase {
 
     int mixerProc();
 
-    void open(const char *name) override;
+    void open(std::string_view name) override;
     bool reset() override;
     void start() override;
     void stop() override;
@@ -143,6 +145,7 @@ struct WinMMPlayback final : public BackendBase {
     al::semaphore mSem;
     uint mIdx{0u};
     std::array<WAVEHDR,4> mWaveBuffer{};
+    al::vector<char,16> mBuffer;
 
     HWAVEOUT mOutHdl{nullptr};
 
@@ -150,8 +153,6 @@ struct WinMMPlayback final : public BackendBase {
 
     std::atomic<bool> mKillNow{true};
     std::thread mThread;
-
-    DEF_NEWDEL(WinMMPlayback)
 };
 
 WinMMPlayback::~WinMMPlayback()
@@ -159,14 +160,11 @@ WinMMPlayback::~WinMMPlayback()
     if(mOutHdl)
         waveOutClose(mOutHdl);
     mOutHdl = nullptr;
-
-    al_free(mWaveBuffer[0].lpData);
-    std::fill(mWaveBuffer.begin(), mWaveBuffer.end(), WAVEHDR{});
 }
 
 /* WinMMPlayback::waveOutProc
  *
- * Posts a message to 'WinMMPlayback::mixerProc' everytime a WaveOut Buffer is
+ * Posts a message to 'WinMMPlayback::mixerProc' every time a WaveOut Buffer is
  * completed and returns to the application (for more data)
  */
 void CALLBACK WinMMPlayback::waveOutProc(HWAVEOUT, UINT msg, DWORD_PTR, DWORD_PTR) noexcept
@@ -207,18 +205,18 @@ FORCE_ALIGN int WinMMPlayback::mixerProc()
 }
 
 
-void WinMMPlayback::open(const char *name)
+void WinMMPlayback::open(std::string_view name)
 {
     if(PlaybackDevices.empty())
         ProbePlaybackDevices();
 
     // Find the Device ID matching the deviceName if valid
-    auto iter = name ?
+    auto iter = !name.empty() ?
         std::find(PlaybackDevices.cbegin(), PlaybackDevices.cend(), name) :
         PlaybackDevices.cbegin();
     if(iter == PlaybackDevices.cend())
-        throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%s\" not found",
-            name};
+        throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%.*s\" not found",
+            static_cast<int>(name.length()), name.data()};
     auto DeviceID = static_cast<UINT>(std::distance(PlaybackDevices.cbegin(), iter));
 
     DevFmtType fmttype{mDevice->FmtType};
@@ -312,11 +310,11 @@ bool WinMMPlayback::reset()
     }
     setDefaultWFXChannelOrder();
 
-    uint BufferSize{mDevice->UpdateSize * mFormat.nChannels * mDevice->bytesFromFmt()};
+    const uint BufferSize{mDevice->UpdateSize * mFormat.nChannels * mDevice->bytesFromFmt()};
 
-    al_free(mWaveBuffer[0].lpData);
+    decltype(mBuffer)(BufferSize*mWaveBuffer.size()).swap(mBuffer);
     mWaveBuffer[0] = WAVEHDR{};
-    mWaveBuffer[0].lpData = static_cast<char*>(al_calloc(16, BufferSize * mWaveBuffer.size()));
+    mWaveBuffer[0].lpData = mBuffer.data();
     mWaveBuffer[0].dwBufferLength = BufferSize;
     for(size_t i{1};i < mWaveBuffer.size();i++)
     {
@@ -369,16 +367,17 @@ struct WinMMCapture final : public BackendBase {
 
     int captureProc();
 
-    void open(const char *name) override;
+    void open(std::string_view name) override;
     void start() override;
     void stop() override;
-    void captureSamples(al::byte *buffer, uint samples) override;
+    void captureSamples(std::byte *buffer, uint samples) override;
     uint availableSamples() override;
 
     std::atomic<uint> mReadable{0u};
     al::semaphore mSem;
     uint mIdx{0};
     std::array<WAVEHDR,4> mWaveBuffer{};
+    al::vector<char,16> mBuffer;
 
     HWAVEIN mInHdl{nullptr};
 
@@ -388,8 +387,6 @@ struct WinMMCapture final : public BackendBase {
 
     std::atomic<bool> mKillNow{true};
     std::thread mThread;
-
-    DEF_NEWDEL(WinMMCapture)
 };
 
 WinMMCapture::~WinMMCapture()
@@ -398,14 +395,11 @@ WinMMCapture::~WinMMCapture()
     if(mInHdl)
         waveInClose(mInHdl);
     mInHdl = nullptr;
-
-    al_free(mWaveBuffer[0].lpData);
-    std::fill(mWaveBuffer.begin(), mWaveBuffer.end(), WAVEHDR{});
 }
 
 /* WinMMCapture::waveInProc
  *
- * Posts a message to 'WinMMCapture::captureProc' everytime a WaveIn Buffer is
+ * Posts a message to 'WinMMCapture::captureProc' every time a WaveIn Buffer is
  * completed and returns to the application (with more data).
  */
 void CALLBACK WinMMCapture::waveInProc(HWAVEIN, UINT msg, DWORD_PTR, DWORD_PTR) noexcept
@@ -434,7 +428,8 @@ int WinMMCapture::captureProc()
             WAVEHDR &waveHdr = mWaveBuffer[widx];
             widx = (widx+1) % mWaveBuffer.size();
 
-            mRing->write(waveHdr.lpData, waveHdr.dwBytesRecorded / mFormat.nBlockAlign);
+            std::ignore = mRing->write(waveHdr.lpData,
+                waveHdr.dwBytesRecorded / mFormat.nBlockAlign);
             mReadable.fetch_sub(1, std::memory_order_acq_rel);
             waveInAddBuffer(mInHdl, &waveHdr, sizeof(WAVEHDR));
         } while(--todo);
@@ -445,18 +440,18 @@ int WinMMCapture::captureProc()
 }
 
 
-void WinMMCapture::open(const char *name)
+void WinMMCapture::open(std::string_view name)
 {
     if(CaptureDevices.empty())
         ProbeCaptureDevices();
 
     // Find the Device ID matching the deviceName if valid
-    auto iter = name ?
+    auto iter = !name.empty() ?
         std::find(CaptureDevices.cbegin(), CaptureDevices.cend(), name) :
         CaptureDevices.cbegin();
     if(iter == CaptureDevices.cend())
-        throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%s\" not found",
-            name};
+        throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%.*s\" not found",
+            static_cast<int>(name.length()), name.data()};
     auto DeviceID = static_cast<UINT>(std::distance(CaptureDevices.cbegin(), iter));
 
     switch(mDevice->FmtChans)
@@ -518,9 +513,9 @@ void WinMMCapture::open(const char *name)
 
     mRing = RingBuffer::Create(CapturedDataSize, mFormat.nBlockAlign, false);
 
-    al_free(mWaveBuffer[0].lpData);
+    decltype(mBuffer)(BufferSize*mWaveBuffer.size()).swap(mBuffer);
     mWaveBuffer[0] = WAVEHDR{};
-    mWaveBuffer[0].lpData = static_cast<char*>(al_calloc(16, BufferSize * mWaveBuffer.size()));
+    mWaveBuffer[0].lpData = mBuffer.data();
     mWaveBuffer[0].dwBufferLength = BufferSize;
     for(size_t i{1};i < mWaveBuffer.size();++i)
     {
@@ -571,8 +566,8 @@ void WinMMCapture::stop()
     mIdx = 0;
 }
 
-void WinMMCapture::captureSamples(al::byte *buffer, uint samples)
-{ mRing->read(buffer, samples); }
+void WinMMCapture::captureSamples(std::byte *buffer, uint samples)
+{ std::ignore = mRing->read(buffer, samples); }
 
 uint WinMMCapture::availableSamples()
 { return static_cast<uint>(mRing->readSpace()); }

@@ -22,11 +22,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <iterator>
 #include <numeric>
-#include <stdint.h>
 
 #include "alc/effects/base.h"
 #include "almalloc.h"
@@ -48,11 +49,6 @@
 #include "vecmat.h"
 #include "vector.h"
 
-/* This is a user config option for modifying the overall output of the reverb
- * effect.
- */
-float ReverbBoost = 1.0f;
-
 namespace {
 
 using uint = unsigned int;
@@ -65,7 +61,42 @@ constexpr float DefaultModulationTime{0.25f};
 #define MOD_FRACMASK (MOD_FRACONE-1)
 
 
-using namespace std::placeholders;
+struct CubicFilter {
+    static constexpr size_t sTableBits{8};
+    static constexpr size_t sTableSteps{1 << sTableBits};
+    static constexpr size_t sTableMask{sTableSteps - 1};
+
+    std::array<float,sTableSteps*2 + 1> mFilter{};
+
+    constexpr CubicFilter()
+    {
+        /* This creates a lookup table for a cubic spline filter, with 256
+         * steps between samples. Only half the coefficients are needed, since
+         * Coeff2 is just Coeff1 in reverse and Coeff3 is just Coeff0 in
+         * reverse.
+         */
+        for(size_t i{0};i < sTableSteps;++i)
+        {
+            const double mu{static_cast<double>(i) / double{sTableSteps}};
+            const double mu2{mu*mu}, mu3{mu2*mu};
+            const double a0{-0.5*mu3 +      mu2 + -0.5*mu};
+            const double a1{ 1.5*mu3 + -2.5*mu2           + 1.0f};
+            mFilter[i] = static_cast<float>(a1);
+            mFilter[sTableSteps+i] = static_cast<float>(a0);
+        }
+    }
+
+    [[nodiscard]] constexpr auto getCoeff0(size_t i) const noexcept -> float
+    { return mFilter[sTableSteps+i]; }
+    [[nodiscard]] constexpr auto getCoeff1(size_t i) const noexcept -> float
+    { return mFilter[i]; }
+    [[nodiscard]] constexpr auto getCoeff2(size_t i) const noexcept -> float
+    { return mFilter[sTableSteps-i]; }
+    [[nodiscard]] constexpr auto getCoeff3(size_t i) const noexcept -> float
+    { return mFilter[sTableSteps*2-i]; }
+};
+constexpr CubicFilter gCubicTable;
+
 
 /* Max samples per process iteration. Used to limit the size needed for
  * temporary buffers. Must be a multiple of 4 for SIMD alignment.
@@ -89,35 +120,41 @@ constexpr size_t NUM_LINES{4u};
 constexpr float MODULATION_DEPTH_COEFF{0.05f};
 
 
-/* The B-Format to A-Format conversion matrix. The arrangement of rows is
- * deliberately chosen to align the resulting lines to their spatial opposites
- * (0:above front left <-> 3:above back right, 1:below front right <-> 2:below
- * back left). It's not quite opposite, since the A-Format results in a
- * tetrahedron, but it's close enough. Should the model be extended to 8-lines
- * in the future, true opposites can be used.
+/* The B-Format to (W-normalized) A-Format conversion matrix. This produces a
+ * tetrahedral array of discrete signals (boosted by a factor of sqrt(3), to
+ * reduce the error introduced in the conversion).
  */
-alignas(16) constexpr float B2A[NUM_LINES][NUM_LINES]{
-    { 0.5f,  0.5f,  0.5f,  0.5f },
-    { 0.5f, -0.5f, -0.5f,  0.5f },
-    { 0.5f,  0.5f, -0.5f, -0.5f },
-    { 0.5f, -0.5f,  0.5f, -0.5f }
-};
-
-/* Converts A-Format to B-Format for early reflections. */
-alignas(16) constexpr std::array<std::array<float,NUM_LINES>,NUM_LINES> EarlyA2B{{
-    {{ 0.5f,  0.5f,  0.5f,  0.5f }},
-    {{ 0.5f, -0.5f,  0.5f, -0.5f }},
-    {{ 0.5f, -0.5f, -0.5f,  0.5f }},
-    {{ 0.5f,  0.5f, -0.5f, -0.5f }}
+alignas(16) constexpr std::array<std::array<float,NUM_LINES>,NUM_LINES> B2A{{
+    /*   W      Y      Z      X  */
+    {{ 0.5f,  0.5f,  0.5f,  0.5f }}, /* A0 */
+    {{ 0.5f, -0.5f, -0.5f,  0.5f }}, /* A1 */
+    {{ 0.5f,  0.5f, -0.5f, -0.5f }}, /* A2 */
+    {{ 0.5f, -0.5f,  0.5f, -0.5f }}  /* A3 */
 }};
 
-/* Converts A-Format to B-Format for late reverb. */
+/* Converts (W-normalized) A-Format to B-Format for early reflections (scaled
+ * by 1/sqrt(3) to compensate for the boost in the B2A matrix).
+ */
+alignas(16) constexpr std::array<std::array<float,NUM_LINES>,NUM_LINES> EarlyA2B{{
+    /*  A0     A1     A2     A3  */
+    {{ 0.5f,  0.5f,  0.5f,  0.5f }}, /* W */
+    {{ 0.5f, -0.5f,  0.5f, -0.5f }}, /* Y */
+    {{ 0.5f, -0.5f, -0.5f,  0.5f }}, /* Z */
+    {{ 0.5f,  0.5f, -0.5f, -0.5f }}  /* X */
+}};
+
+/* Converts (W-normalized) A-Format to B-Format for late reverb (scaled
+ * by 1/sqrt(3) to compensate for the boost in the B2A matrix). The response
+ * is rotated around Z (ambisonic X) so that the front lines are placed
+ * horizontally in front, and the rear lines are placed vertically in back.
+ */
 constexpr auto InvSqrt2 = static_cast<float>(1.0/al::numbers::sqrt2);
 alignas(16) constexpr std::array<std::array<float,NUM_LINES>,NUM_LINES> LateA2B{{
-    {{ 0.5f,  0.5f,  0.5f,  0.5f }},
-    {{ InvSqrt2, -InvSqrt2,  0.0f,  0.0f }},
-    {{ 0.0f,  0.0f,  InvSqrt2, -InvSqrt2 }},
-    {{ 0.5f,  0.5f, -0.5f, -0.5f }}
+    /*     A0         A1         A2        A3   */
+    {{     0.5f,      0.5f,      0.5f,     0.5f }}, /* W */
+    {{ InvSqrt2, -InvSqrt2,      0.0f,     0.0f }}, /* Y */
+    {{     0.0f,      0.0f, -InvSqrt2, InvSqrt2 }}, /* Z */
+    {{     0.5f,      0.5f,     -0.5f,    -0.5f }}  /* X */
 }};
 
 /* The all-pass and delay lines have a variable length dependent on the
@@ -218,7 +255,7 @@ constexpr std::array<float,NUM_LINES> EARLY_ALLPASS_LENGTHS{{
  * Using an average dimension of 1m, we get:
  */
 constexpr std::array<float,NUM_LINES> EARLY_LINE_LENGTHS{{
-    5.9850400e-4f, 1.0913150e-3f, 1.5376658e-3f, 1.9419362e-3f
+    0.0000000e+0f, 4.9281100e-4f, 9.3916180e-4f, 1.3434322e-3f
 }};
 
 /* The late all-pass filter lengths are based on the late line lengths:
@@ -256,20 +293,16 @@ struct DelayLineI {
      * of 2 to allow the use of bit-masking instead of a modulus for wrapping.
      */
     size_t Mask{0u};
-    union {
-        uintptr_t LineOffset{0u};
-        std::array<float,NUM_LINES> *Line;
-    };
+    float *Line{};
 
     /* Given the allocated sample buffer, this function updates each delay line
      * offset.
      */
-    void realizeLineOffset(std::array<float,NUM_LINES> *sampleBuffer) noexcept
-    { Line = sampleBuffer + LineOffset; }
+    void realizeLineOffset(float *sampleBuffer) noexcept
+    { Line = sampleBuffer; }
 
     /* Calculate the length of a delay line and store its mask and offset. */
-    uint calcLineLength(const float length, const uintptr_t offset, const float frequency,
-        const uint extra)
+    size_t calcLineLength(const float length, const float frequency, const uint extra)
     {
         /* All line lengths are powers of 2, calculated from their lengths in
          * seconds, rounded up.
@@ -279,21 +312,87 @@ struct DelayLineI {
 
         /* All lines share a single sample buffer. */
         Mask = samples - 1;
-        LineOffset = offset;
 
         /* Return the sample count for accumulation. */
-        return samples;
+        return samples*NUM_LINES;
     }
 
-    void write(size_t offset, const size_t c, const float *RESTRICT in, const size_t count) const noexcept
+    [[nodiscard]]
+    auto &get(size_t i, size_t chan) const noexcept { return Line[i*NUM_LINES + chan]; }
+    void set(size_t i, const std::array<float,NUM_LINES> in) const noexcept
+    { std::copy_n(in.begin(), NUM_LINES, Line + i*NUM_LINES); }
+};
+
+struct DelayLineU {
+    size_t Mask{0u};
+    float *Line{};
+
+    void realizeLineOffset(float *sampleBuffer) noexcept
+    { Line = sampleBuffer; }
+
+    size_t calcLineLength(const float length, const float frequency, const uint extra)
     {
+        uint samples{float2uint(std::ceil(length*frequency))};
+        samples = NextPowerOf2(samples + extra);
+
+        Mask = samples - 1;
+
+        return samples*NUM_LINES;
+    }
+
+    [[nodiscard]]
+    auto get(size_t chan) const noexcept { return al::span{Line + chan*(Mask+1), Mask+1}; }
+
+    void write(size_t offset, const size_t c, const float *in, const size_t count) const noexcept
+    {
+        ASSUME(count > 0);
+        float *RESTRICT out{al::assume_aligned<16>(Line + c*(Mask+1))};
+        for(size_t i{0u};i < count;)
+        {
+            offset &= Mask;
+            const size_t td{std::min(Mask+1 - offset, count - i)};
+            std::copy_n(in+i, td, out+offset);
+            offset += td;
+            i += td;
+        }
+    }
+
+    /* Writes the given input lines to the delay buffer, applying a geometric
+     * reflection. This effectively applies the matrix
+     *
+     * [ -1/2 +1/2 +1/2 +1/2 ]
+     * [ +1/2 -1/2 +1/2 +1/2 ]
+     * [ +1/2 +1/2 -1/2 +1/2 ]
+     * [ +1/2 +1/2 +1/2 -1/2 ]
+     *
+     * to the four input lines when writing to the delay buffer. The effect on
+     * the B-Format signal is negating X,Y,Z, moving each response to its
+     * spatially opposite location.
+     */
+    void writeReflected(size_t offset, const al::span<const ReverbUpdateLine,NUM_LINES> in,
+        const size_t count) const noexcept
+    {
+        const size_t stride{Mask+1};
         ASSUME(count > 0);
         for(size_t i{0u};i < count;)
         {
             offset &= Mask;
-            size_t td{minz(Mask+1 - offset, count - i)};
+            size_t td{std::min(Mask+1 - offset, count - i)};
             do {
-                Line[offset++][c] = in[i++];
+                const std::array src{in[0][i], in[1][i], in[2][i], in[3][i]};
+                ++i;
+
+                const std::array f{
+                    (         src[1] + src[2] + src[3] - src[0]) * 0.5f,
+                    (src[0] +          src[2] + src[3] - src[1]) * 0.5f,
+                    (src[0] + src[1] +          src[3] - src[2]) * 0.5f,
+                    (src[0] + src[1] + src[2]          - src[3]) * 0.5f
+                };
+                Line[0*stride + offset] = f[0];
+                Line[1*stride + offset] = f[1];
+                Line[2*stride + offset] = f[2];
+                Line[3*stride + offset] = f[3];
+                ++offset;
             } while(--td);
         }
     }
@@ -302,10 +401,19 @@ struct DelayLineI {
 struct VecAllpass {
     DelayLineI Delay;
     float Coeff{0.0f};
-    size_t Offset[NUM_LINES]{};
+    std::array<size_t,NUM_LINES> Offset{};
 
     void process(const al::span<ReverbUpdateLine,NUM_LINES> samples, size_t offset,
-        const float xCoeff, const float yCoeff, const size_t todo);
+        const float xCoeff, const float yCoeff, const size_t todo) noexcept;
+};
+
+struct Allpass4 {
+    DelayLineU Delay;
+    float Coeff{0.0f};
+    std::array<size_t,NUM_LINES> Offset{};
+
+    void process(const al::span<ReverbUpdateLine,NUM_LINES> samples, size_t offset,
+        const size_t todo) noexcept;
 };
 
 struct T60Filter {
@@ -326,21 +434,21 @@ struct T60Filter {
 };
 
 struct EarlyReflections {
-    /* A Gerzon vector all-pass filter is used to simulate initial diffusion.
-     * The spread from this filter also helps smooth out the reverb tail.
-     */
-    VecAllpass VecAp;
+    Allpass4 VecAp;
 
     /* An echo line is used to complete the second half of the early
      * reflections.
      */
-    DelayLineI Delay;
-    size_t Offset[NUM_LINES]{};
-    float Coeff[NUM_LINES]{};
+    DelayLineU Delay;
+    std::array<size_t,NUM_LINES> Offset{};
+    std::array<float,NUM_LINES> Coeff{};
 
     /* The gain for each output channel based on 3D panning. */
-    float CurrentGains[NUM_LINES][MaxAmbiChannels]{};
-    float TargetGains[NUM_LINES][MaxAmbiChannels]{};
+    struct OutGains {
+        std::array<float,MaxAmbiChannels> Current{};
+        std::array<float,MaxAmbiChannels> Target{};
+    };
+    std::array<OutGains,NUM_LINES> Gains{};
 
     void updateLines(const float density_mult, const float diffusion, const float decayTime,
         const float frequency);
@@ -351,12 +459,12 @@ struct Modulation {
     /* The vibrato time is tracked with an index over a (MOD_FRACONE)
      * normalized range.
      */
-    uint Index, Step;
+    uint Index{}, Step{};
 
     /* The depth of frequency change, in samples. */
-    float Depth;
+    float Depth{};
 
-    float ModDelays[MAX_UPDATE_SAMPLES];
+    std::array<uint,MAX_UPDATE_SAMPLES> ModDelays{};
 
     void updateModulator(float modTime, float modDepth, float frequency);
 
@@ -365,8 +473,8 @@ struct Modulation {
 
 struct LateReverb {
     /* A recursive delay line is used fill in the reverb tail. */
-    DelayLineI Delay;
-    size_t     Offset[NUM_LINES]{};
+    DelayLineU Delay;
+    std::array<size_t,NUM_LINES> Offset{};
 
     /* Attenuation to compensate for the modal density and decay rate of the
      * late lines.
@@ -374,7 +482,7 @@ struct LateReverb {
     float DensityGain{0.0f};
 
     /* T60 decay filters are used to simulate absorption. */
-    T60Filter T60[NUM_LINES];
+    std::array<T60Filter,NUM_LINES> T60;
 
     Modulation Mod;
 
@@ -382,8 +490,11 @@ struct LateReverb {
     VecAllpass VecAp;
 
     /* The gain for each output channel based on 3D panning. */
-    float CurrentGains[NUM_LINES][MaxAmbiChannels]{};
-    float TargetGains[NUM_LINES][MaxAmbiChannels]{};
+    struct OutGains {
+        std::array<float,MaxAmbiChannels> Current{};
+        std::array<float,MaxAmbiChannels> Target{};
+    };
+    std::array<OutGains,NUM_LINES> Gains{};
 
     void updateLines(const float density_mult, const float diffusion, const float lfDecayTime,
         const float mfDecayTime, const float hfDecayTime, const float lf0norm,
@@ -398,21 +509,22 @@ struct LateReverb {
 
 struct ReverbPipeline {
     /* Master effect filters */
-    struct {
+    struct FilterPair {
         BiquadFilter Lp;
         BiquadFilter Hp;
-    } mFilter[NUM_LINES];
+    };
+    std::array<FilterPair,NUM_LINES> mFilter;
 
     /* Core delay line (early reflections and late reverb tap from this). */
-    DelayLineI mEarlyDelayIn;
-    DelayLineI mLateDelayIn;
+    DelayLineU mEarlyDelayIn;
+    DelayLineU mLateDelayIn;
 
     /* Tap points for early reflection delay. */
-    size_t mEarlyDelayTap[NUM_LINES][2]{};
-    float mEarlyDelayCoeff[NUM_LINES]{};
+    std::array<std::array<size_t,2>,NUM_LINES> mEarlyDelayTap{};
+    std::array<float,NUM_LINES> mEarlyDelayCoeff{};
 
     /* Tap points for late reverb feed and delay. */
-    size_t mLateDelayTap[NUM_LINES][2]{};
+    std::array<std::array<size_t,2>,NUM_LINES> mLateDelayTap{};
 
     /* Coefficients for the all-pass and line scattering matrices. */
     float mMixX{0.0f};
@@ -428,8 +540,9 @@ struct ReverbPipeline {
 
     void updateDelayLine(const float earlyDelay, const float lateDelay, const float density_mult,
         const float decayTime, const float frequency);
-    void update3DPanning(const float *ReflectionsPan, const float *LateReverbPan,
-        const float earlyGain, const float lateGain, const bool doUpmix, const MixParams *mainMix);
+    void update3DPanning(const al::span<const float,3> ReflectionsPan,
+        const al::span<const float,3> LateReverbPan, const float earlyGain, const float lateGain,
+        const bool doUpmix, const MixParams *mainMix);
 
     void processEarly(size_t offset, const size_t samplesToDo,
         const al::span<ReverbUpdateLine,NUM_LINES> tempSamples,
@@ -458,7 +571,7 @@ struct ReverbState final : public EffectState {
     /* All delay lines are allocated as a single buffer to reduce memory
      * fragmentation and management code.
      */
-    al::vector<std::array<float,NUM_LINES>,16> mSampleBuffer;
+    al::vector<float,16> mSampleBuffer;
 
     struct {
         /* Calculated parameters which indicate if cross-fading is needed after
@@ -483,9 +596,9 @@ struct ReverbState final : public EffectState {
         Normal,
     };
     PipelineState mPipelineState{DeviceClear};
-    uint8_t mCurrentPipeline{0};
+    bool mCurrentPipeline{false};
 
-    ReverbPipeline mPipelines[2];
+    std::array<ReverbPipeline,2> mPipelines;
 
     /* The current write offset for all delay lines. */
     size_t mOffset{};
@@ -511,17 +624,19 @@ struct ReverbState final : public EffectState {
         /* When not upsampling, the panning gains convert to B-Format and pan
          * at the same time.
          */
-        for(size_t c{0u};c < NUM_LINES;c++)
+        auto inBuffer = mEarlySamples.cbegin();
+        for(auto &gains : pipeline.mEarly.Gains)
         {
-            const al::span<float> tmpspan{mEarlySamples[c].data(), todo};
-            MixSamples(tmpspan, samplesOut, pipeline.mEarly.CurrentGains[c],
-                pipeline.mEarly.TargetGains[c], todo, 0);
+            MixSamples(al::span{inBuffer->cbegin(), todo}, samplesOut, gains.Current.data(),
+                gains.Target.data(), todo, 0);
+            ++inBuffer;
         }
-        for(size_t c{0u};c < NUM_LINES;c++)
+        inBuffer = mLateSamples.cbegin();
+        for(auto &gains : pipeline.mLate.Gains)
         {
-            const al::span<float> tmpspan{mLateSamples[c].data(), todo};
-            MixSamples(tmpspan, samplesOut, pipeline.mLate.CurrentGains[c],
-                pipeline.mLate.TargetGains[c], todo, 0);
+            MixSamples(al::span{inBuffer->cbegin(), todo}, samplesOut, gains.Current.data(),
+                gains.Target.data(), todo, 0);
+            ++inBuffer;
         }
     }
 
@@ -531,13 +646,14 @@ struct ReverbState final : public EffectState {
         ASSUME(todo > 0);
 
         auto DoMixRow = [](const al::span<float> OutBuffer, const al::span<const float,4> Gains,
-            const float *InSamples, const size_t InStride)
+            const al::span<const FloatBufferLine,4> InSamples)
         {
+            auto inBuffer = InSamples.cbegin();
             std::fill(OutBuffer.begin(), OutBuffer.end(), 0.0f);
             for(const float gain : Gains)
             {
-                const float *RESTRICT input{al::assume_aligned<16>(InSamples)};
-                InSamples += InStride;
+                const float *RESTRICT input{al::assume_aligned<16>(inBuffer->data())};
+                ++inBuffer;
 
                 if(!(std::fabs(gain) > GainSilenceThreshold))
                     continue;
@@ -554,28 +670,32 @@ struct ReverbState final : public EffectState {
          * The panning gains then pan and upsample the B-Format channels.
          */
         const al::span<float> tmpspan{al::assume_aligned<16>(mTempLine.data()), todo};
-        for(size_t c{0u};c < NUM_LINES;c++)
+        float hfscale{mOrderScales[0]};
+        auto splitter = pipeline.mAmbiSplitter[0].begin();
+        auto a2bcoeffs = EarlyA2B.cbegin();
+        for(auto &gains : pipeline.mEarly.Gains)
         {
-            DoMixRow(tmpspan, EarlyA2B[c], mEarlySamples[0].data(), mEarlySamples[0].size());
+            DoMixRow(tmpspan, *(a2bcoeffs++), mEarlySamples);
 
             /* Apply scaling to the B-Format's HF response to "upsample" it to
              * higher-order output.
              */
-            const float hfscale{(c==0) ? mOrderScales[0] : mOrderScales[1]};
-            pipeline.mAmbiSplitter[0][c].processHfScale(tmpspan, hfscale);
+            splitter->processHfScale(tmpspan, hfscale);
+            ++splitter; hfscale = mOrderScales[1];
 
-            MixSamples(tmpspan, samplesOut, pipeline.mEarly.CurrentGains[c],
-                pipeline.mEarly.TargetGains[c], todo, 0);
+            MixSamples(tmpspan, samplesOut, gains.Current.data(), gains.Target.data(), todo, 0);
         }
-        for(size_t c{0u};c < NUM_LINES;c++)
+        hfscale = mOrderScales[0];
+        splitter = pipeline.mAmbiSplitter[1].begin();
+        a2bcoeffs = LateA2B.cbegin();
+        for(auto &gains : pipeline.mLate.Gains)
         {
-            DoMixRow(tmpspan, LateA2B[c], mLateSamples[0].data(), mLateSamples[0].size());
+            DoMixRow(tmpspan, *(a2bcoeffs++), mLateSamples);
 
-            const float hfscale{(c==0) ? mOrderScales[0] : mOrderScales[1]};
-            pipeline.mAmbiSplitter[1][c].processHfScale(tmpspan, hfscale);
+            splitter->processHfScale(tmpspan, hfscale);
+            ++splitter; hfscale = mOrderScales[1];
 
-            MixSamples(tmpspan, samplesOut, pipeline.mLate.CurrentGains[c],
-                pipeline.mLate.TargetGains[c], todo, 0);
+            MixSamples(tmpspan, samplesOut, gains.Current.data(), gains.Target.data(), todo, 0);
         }
     }
 
@@ -589,13 +709,11 @@ struct ReverbState final : public EffectState {
 
     void allocLines(const float frequency);
 
-    void deviceUpdate(const DeviceBase *device, const Buffer &buffer) override;
+    void deviceUpdate(const DeviceBase *device, const BufferStorage *buffer) override;
     void update(const ContextBase *context, const EffectSlot *slot, const EffectProps *props,
         const EffectTarget target) override;
     void process(const size_t samplesToDo, const al::span<const FloatBufferLine> samplesIn,
         const al::span<FloatBufferLine> samplesOut) override;
-
-    DEF_NEWDEL(ReverbState)
 };
 
 /**************************************
@@ -610,11 +728,6 @@ inline float CalcDelayLengthMult(float density)
  */
 void ReverbState::allocLines(const float frequency)
 {
-    /* All delay line lengths are calculated to accomodate the full range of
-     * lengths given their respective paramters.
-     */
-    size_t totalSamples{0u};
-
     /* Multiplier for the maximum density value, i.e. density=1, which is
      * actually the least density...
      */
@@ -624,8 +737,12 @@ void ReverbState::allocLines(const float frequency)
      * time and depth coefficient, and halfed for the low-to-high frequency
      * swing.
      */
-    constexpr float max_mod_delay{MaxModulationTime*MODULATION_DEPTH_COEFF / 2.0f};
+    static constexpr float max_mod_delay{MaxModulationTime*MODULATION_DEPTH_COEFF / 2.0f};
 
+    std::array<size_t,12> lineoffsets{};
+    size_t oidx{0};
+
+    size_t totalSamples{0u};
     for(auto &pipeline : mPipelines)
     {
         /* The main delay length includes the maximum early reflection delay,
@@ -634,37 +751,45 @@ void ReverbState::allocLines(const float frequency)
          * update size (BufferLineSize) for block processing.
          */
         float length{ReverbMaxReflectionsDelay + EARLY_TAP_LENGTHS.back()*multiplier};
-        totalSamples += pipeline.mEarlyDelayIn.calcLineLength(length, totalSamples, frequency,
-            BufferLineSize);
+        size_t count{pipeline.mEarlyDelayIn.calcLineLength(length, frequency, BufferLineSize)};
+        lineoffsets[oidx++] = totalSamples;
+        totalSamples += count;
 
-        constexpr float LateLineDiffAvg{(LATE_LINE_LENGTHS.back()-LATE_LINE_LENGTHS.front()) /
+        static constexpr float LateDiffAvg{(LATE_LINE_LENGTHS.back()-LATE_LINE_LENGTHS.front()) /
             float{NUM_LINES}};
-        length = ReverbMaxLateReverbDelay + LateLineDiffAvg*multiplier;
-        totalSamples += pipeline.mLateDelayIn.calcLineLength(length, totalSamples, frequency,
-            BufferLineSize);
+        length = ReverbMaxLateReverbDelay + LateDiffAvg*multiplier;
+        count = pipeline.mLateDelayIn.calcLineLength(length, frequency, BufferLineSize);
+        lineoffsets[oidx++] = totalSamples;
+        totalSamples += count;
 
         /* The early vector all-pass line. */
         length = EARLY_ALLPASS_LENGTHS.back() * multiplier;
-        totalSamples += pipeline.mEarly.VecAp.Delay.calcLineLength(length, totalSamples, frequency,
-            0);
+        count = pipeline.mEarly.VecAp.Delay.calcLineLength(length, frequency, 0);
+        lineoffsets[oidx++] = totalSamples;
+        totalSamples += count;
 
         /* The early reflection line. */
         length = EARLY_LINE_LENGTHS.back() * multiplier;
-        totalSamples += pipeline.mEarly.Delay.calcLineLength(length, totalSamples, frequency,
-            MAX_UPDATE_SAMPLES);
+        count = pipeline.mEarly.Delay.calcLineLength(length, frequency, MAX_UPDATE_SAMPLES);
+        lineoffsets[oidx++] = totalSamples;
+        totalSamples += count;
 
         /* The late vector all-pass line. */
         length = LATE_ALLPASS_LENGTHS.back() * multiplier;
-        totalSamples += pipeline.mLate.VecAp.Delay.calcLineLength(length, totalSamples, frequency,
-            0);
+        count = pipeline.mLate.VecAp.Delay.calcLineLength(length, frequency, 0);
+        lineoffsets[oidx++] = totalSamples;
+        totalSamples += count;
 
         /* The late delay lines are calculated from the largest maximum density
-         * line length, and the maximum modulation delay. An additional sample
-         * is added to keep it stable when there is no modulation.
+         * line length, and the maximum modulation delay. Four additional
+         * samples are needed for resampling the modulator delay.
          */
         length = LATE_LINE_LENGTHS.back()*multiplier + max_mod_delay;
-        totalSamples += pipeline.mLate.Delay.calcLineLength(length, totalSamples, frequency, 1);
+        count = pipeline.mLate.Delay.calcLineLength(length, frequency, 4);
+        lineoffsets[oidx++] = totalSamples;
+        totalSamples += count;
     }
+    assert(oidx == lineoffsets.size());
 
     if(totalSamples != mSampleBuffer.size())
         decltype(mSampleBuffer)(totalSamples).swap(mSampleBuffer);
@@ -673,18 +798,19 @@ void ReverbState::allocLines(const float frequency)
     std::fill(mSampleBuffer.begin(), mSampleBuffer.end(), decltype(mSampleBuffer)::value_type{});
 
     /* Update all delays to reflect the new sample buffer. */
+    oidx = 0;
     for(auto &pipeline : mPipelines)
     {
-        pipeline.mEarlyDelayIn.realizeLineOffset(mSampleBuffer.data());
-        pipeline.mLateDelayIn.realizeLineOffset(mSampleBuffer.data());
-        pipeline.mEarly.VecAp.Delay.realizeLineOffset(mSampleBuffer.data());
-        pipeline.mEarly.Delay.realizeLineOffset(mSampleBuffer.data());
-        pipeline.mLate.VecAp.Delay.realizeLineOffset(mSampleBuffer.data());
-        pipeline.mLate.Delay.realizeLineOffset(mSampleBuffer.data());
+        pipeline.mEarlyDelayIn.realizeLineOffset(mSampleBuffer.data() + lineoffsets[oidx++]);
+        pipeline.mLateDelayIn.realizeLineOffset(mSampleBuffer.data() + lineoffsets[oidx++]);
+        pipeline.mEarly.VecAp.Delay.realizeLineOffset(mSampleBuffer.data() + lineoffsets[oidx++]);
+        pipeline.mEarly.Delay.realizeLineOffset(mSampleBuffer.data() + lineoffsets[oidx++]);
+        pipeline.mLate.VecAp.Delay.realizeLineOffset(mSampleBuffer.data() + lineoffsets[oidx++]);
+        pipeline.mLate.Delay.realizeLineOffset(mSampleBuffer.data() + lineoffsets[oidx++]);
     }
 }
 
-void ReverbState::deviceUpdate(const DeviceBase *device, const Buffer&)
+void ReverbState::deviceUpdate(const DeviceBase *device, const BufferStorage*)
 {
     const auto frequency = static_cast<float>(device->Frequency);
 
@@ -693,17 +819,16 @@ void ReverbState::deviceUpdate(const DeviceBase *device, const Buffer&)
 
     for(auto &pipeline : mPipelines)
     {
-        /* Clear filters and gain coefficients since the delay lines were all just
-        * cleared (if not reallocated).
-        */
+        /* Clear filters and gain coefficients since the delay lines were all
+         * just cleared (if not reallocated).
+         */
         for(auto &filter : pipeline.mFilter)
         {
             filter.Lp.clear();
             filter.Hp.clear();
         }
 
-        std::fill(std::begin(pipeline.mEarlyDelayCoeff),std::end(pipeline.mEarlyDelayCoeff), 0.0f);
-        std::fill(std::begin(pipeline.mEarlyDelayCoeff),std::end(pipeline.mEarlyDelayCoeff), 0.0f);
+        pipeline.mEarlyDelayCoeff.fill(0.0f);
 
         pipeline.mLate.DensityGain = 0.0f;
         for(auto &t60 : pipeline.mLate.T60)
@@ -717,14 +842,16 @@ void ReverbState::deviceUpdate(const DeviceBase *device, const Buffer&)
         pipeline.mLate.Mod.Step = 1;
         pipeline.mLate.Mod.Depth = 0.0f;
 
-        for(auto &gains : pipeline.mEarly.CurrentGains)
-            std::fill(std::begin(gains), std::end(gains), 0.0f);
-        for(auto &gains : pipeline.mEarly.TargetGains)
-            std::fill(std::begin(gains), std::end(gains), 0.0f);
-        for(auto &gains : pipeline.mLate.CurrentGains)
-            std::fill(std::begin(gains), std::end(gains), 0.0f);
-        for(auto &gains : pipeline.mLate.TargetGains)
-            std::fill(std::begin(gains), std::end(gains), 0.0f);
+        for(auto &gains : pipeline.mEarly.Gains)
+        {
+            gains.Current.fill(0.0f);
+            gains.Target.fill(0.0f);
+        }
+        for(auto &gains : pipeline.mLate.Gains)
+        {
+            gains.Current.fill(0.0f);
+            gains.Target.fill(0.0f);
+        }
     }
     mPipelineState = DeviceClear;
 
@@ -943,9 +1070,12 @@ void LateReverb::updateLines(const float density_mult, const float diffusion,
         length = LATE_ALLPASS_LENGTHS[i] * density_mult;
         VecAp.Offset[i] = float2uint(length * frequency);
 
-        /* Calculate the delay length of each feedback delay line. */
+        /* Calculate the delay length of each feedback delay line. A cubic
+         * resampler is used for modulation on the feedback delay, which
+         * includes one sample of delay. Reduce by one to compensate.
+         */
         length = LATE_LINE_LENGTHS[i] * density_mult;
-        Offset[i] = float2uint(length*frequency + 0.5f);
+        Offset[i] = maxu(float2uint(length*frequency + 0.5f), 1u) - 1u;
 
         /* Approximate the absorption that the vector all-pass would exhibit
          * given the current diffusion so we don't have to process a full T60
@@ -981,6 +1111,10 @@ void ReverbPipeline::updateDelayLine(const float earlyDelay, const float lateDel
         mEarlyDelayTap[i][1] = float2uint((earlyDelay+length) * frequency);
         mEarlyDelayCoeff[i] = CalcDecayCoeff(length, decayTime);
 
+        /* Reduce the late delay tap by the shortest early delay line length to
+         * compensate for the late line input being fed by the delayed early
+         * output.
+         */
         length = (LATE_LINE_LENGTHS[i] - LATE_LINE_LENGTHS.front())/float{NUM_LINES}*density_mult +
             lateDelay;
         mLateDelayTap[i][1] = float2uint(length * frequency);
@@ -992,7 +1126,7 @@ void ReverbPipeline::updateDelayLine(const float earlyDelay, const float lateDel
  * focal strength. This function results in a B-Format transformation matrix
  * that spatially focuses the signal in the desired direction.
  */
-std::array<std::array<float,4>,4> GetTransformFromVector(const float *vec)
+std::array<std::array<float,4>,4> GetTransformFromVector(const al::span<const float,3> vec)
 {
     /* Normalize the panning vector according to the N3D scale, which has an
      * extra sqrt(3) term on the directional components. Converting from OpenAL
@@ -1001,13 +1135,14 @@ std::array<std::array<float,4>,4> GetTransformFromVector(const float *vec)
      * rest of OpenAL which use right-handed. This is fixed by negating Z,
      * which cancels out with the B-Format Z negation.
      */
-    float norm[3];
+    std::array<float,3> norm;
     float mag{std::sqrt(vec[0]*vec[0] + vec[1]*vec[1] + vec[2]*vec[2])};
     if(mag > 1.0f)
     {
-        norm[0] = vec[0] / mag * -al::numbers::sqrt3_v<float>;
-        norm[1] = vec[1] / mag * al::numbers::sqrt3_v<float>;
-        norm[2] = vec[2] / mag * al::numbers::sqrt3_v<float>;
+        const float scale{al::numbers::sqrt3_v<float> / mag};
+        norm[0] = vec[0] * -scale;
+        norm[1] = vec[1] * scale;
+        norm[2] = vec[2] * scale;
         mag = 1.0f;
     }
     else
@@ -1030,50 +1165,46 @@ std::array<std::array<float,4>,4> GetTransformFromVector(const float *vec)
 }
 
 /* Update the early and late 3D panning gains. */
-void ReverbPipeline::update3DPanning(const float *ReflectionsPan, const float *LateReverbPan,
-    const float earlyGain, const float lateGain, const bool doUpmix, const MixParams *mainMix)
+void ReverbPipeline::update3DPanning(const al::span<const float,3> ReflectionsPan,
+    const al::span<const float,3> LateReverbPan, const float earlyGain, const float lateGain,
+    const bool doUpmix, const MixParams *mainMix)
 {
     /* Create matrices that transform a B-Format signal according to the
      * panning vectors.
      */
-    const std::array<std::array<float,4>,4> earlymat{GetTransformFromVector(ReflectionsPan)};
-    const std::array<std::array<float,4>,4> latemat{GetTransformFromVector(LateReverbPan)};
+    const auto earlymat = GetTransformFromVector(ReflectionsPan);
+    const auto latemat = GetTransformFromVector(LateReverbPan);
 
-    if(doUpmix)
-    {
-        /* When upsampling, combine the early and late transforms with the
-         * first-order upsample matrix. This results in panning gains that
-         * apply the panning transform to first-order B-Format, which is then
-         * upsampled.
-         */
-        auto mult_matrix = [](const al::span<const std::array<float,4>,4> mtx1)
+    const auto [earlycoeffs, latecoeffs] = [&]{
+        if(doUpmix)
         {
-            auto&& mtx2 = AmbiScale::FirstOrderUp;
-            std::array<std::array<float,MaxAmbiChannels>,NUM_LINES> res{};
-
-            for(size_t i{0};i < mtx1[0].size();++i)
+            /* When upsampling, combine the early and late transforms with the
+             * first-order upsample matrix. This results in panning gains that
+             * apply the panning transform to first-order B-Format, which is
+             * then upsampled.
+             */
+            auto mult_matrix = [](const al::span<const std::array<float,4>,4> mtx1)
             {
-                for(size_t j{0};j < mtx2[0].size();++j)
+                auto&& mtx2 = AmbiScale::FirstOrderUp;
+                std::array<std::array<float,MaxAmbiChannels>,NUM_LINES> res{};
+
+                for(size_t i{0};i < mtx1[0].size();++i)
                 {
-                    double sum{0.0};
+                    const al::span dst{res[i]};
                     for(size_t k{0};k < mtx1.size();++k)
-                        sum += double{mtx1[k][i]} * mtx2[k][j];
-                    res[i][j] = static_cast<float>(sum);
+                    {
+                        const float a{mtx1[k][i]};
+                        std::transform(dst.begin(), dst.end(), mtx2[k].begin(), dst.begin(),
+                            [a](const float out, const float in) noexcept -> float
+                            { return out + a*in; });
+                    }
                 }
-            }
 
-            return res;
-        };
-        auto earlycoeffs = mult_matrix(earlymat);
-        auto latecoeffs = mult_matrix(latemat);
+                return res;
+            };
+            return std::make_pair(mult_matrix(earlymat), mult_matrix(latemat));
+        }
 
-        for(size_t i{0u};i < NUM_LINES;i++)
-            ComputePanGains(mainMix, earlycoeffs[i].data(), earlyGain, mEarly.TargetGains[i]);
-        for(size_t i{0u};i < NUM_LINES;i++)
-            ComputePanGains(mainMix, latecoeffs[i].data(), lateGain, mLate.TargetGains[i]);
-    }
-    else
-    {
         /* When not upsampling, combine the early and late A-to-B-Format
          * conversions with their respective transform. This results panning
          * gains that convert A-Format to B-Format, which is then panned.
@@ -1085,97 +1216,97 @@ void ReverbPipeline::update3DPanning(const float *ReflectionsPan, const float *L
 
             for(size_t i{0};i < mtx1[0].size();++i)
             {
-                for(size_t j{0};j < mtx2.size();++j)
+                const al::span dst{res[i]};
+                for(size_t k{0};k < mtx1.size();++k)
                 {
-                    double sum{0.0};
-                    for(size_t k{0};k < mtx1.size();++k)
-                        sum += double{mtx1[k][i]} * mtx2[j][k];
-                    res[i][j] = static_cast<float>(sum);
+                    const float a{mtx1[k][i]};
+                    std::transform(dst.begin(), dst.end(), mtx2[k].begin(), dst.begin(),
+                        [a](const float out, const float in) noexcept -> float
+                        { return out + a*in; });
                 }
             }
 
             return res;
         };
-        auto earlycoeffs = mult_matrix(EarlyA2B, earlymat);
-        auto latecoeffs = mult_matrix(LateA2B, latemat);
+        return std::make_pair(mult_matrix(EarlyA2B, earlymat), mult_matrix(LateA2B, latemat));
+    }();
 
-        for(size_t i{0u};i < NUM_LINES;i++)
-            ComputePanGains(mainMix, earlycoeffs[i].data(), earlyGain, mEarly.TargetGains[i]);
-        for(size_t i{0u};i < NUM_LINES;i++)
-            ComputePanGains(mainMix, latecoeffs[i].data(), lateGain, mLate.TargetGains[i]);
-    }
+    auto earlygains = mEarly.Gains.begin();
+    for(auto &coeffs : earlycoeffs)
+        ComputePanGains(mainMix, coeffs, earlyGain, (earlygains++)->Target);
+    auto lategains = mLate.Gains.begin();
+    for(auto &coeffs : latecoeffs)
+        ComputePanGains(mainMix, coeffs, lateGain, (lategains++)->Target);
 }
 
 void ReverbState::update(const ContextBase *Context, const EffectSlot *Slot,
-    const EffectProps *props, const EffectTarget target)
+    const EffectProps *props_, const EffectTarget target)
 {
+    auto &props = std::get<ReverbProps>(*props_);
     const DeviceBase *Device{Context->mDevice};
     const auto frequency = static_cast<float>(Device->Frequency);
 
     /* If the HF limit parameter is flagged, calculate an appropriate limit
      * based on the air absorption parameter.
      */
-    float hfRatio{props->Reverb.DecayHFRatio};
-    if(props->Reverb.DecayHFLimit && props->Reverb.AirAbsorptionGainHF < 1.0f)
-        hfRatio = CalcLimitedHfRatio(hfRatio, props->Reverb.AirAbsorptionGainHF,
-            props->Reverb.DecayTime);
+    float hfRatio{props.DecayHFRatio};
+    if(props.DecayHFLimit && props.AirAbsorptionGainHF < 1.0f)
+        hfRatio = CalcLimitedHfRatio(hfRatio, props.AirAbsorptionGainHF, props.DecayTime);
 
     /* Calculate the LF/HF decay times. */
     constexpr float MinDecayTime{0.1f}, MaxDecayTime{20.0f};
-    const float lfDecayTime{clampf(props->Reverb.DecayTime*props->Reverb.DecayLFRatio,
-        MinDecayTime, MaxDecayTime)};
-    const float hfDecayTime{clampf(props->Reverb.DecayTime*hfRatio, MinDecayTime, MaxDecayTime)};
+    const float lfDecayTime{clampf(props.DecayTime*props.DecayLFRatio, MinDecayTime,MaxDecayTime)};
+    const float hfDecayTime{clampf(props.DecayTime*hfRatio, MinDecayTime, MaxDecayTime)};
 
     /* Determine if a full update is required. */
     const bool fullUpdate{mPipelineState == DeviceClear ||
         /* Density is essentially a master control for the feedback delays, so
          * changes the offsets of many delay lines.
          */
-        mParams.Density != props->Reverb.Density ||
+        mParams.Density != props.Density ||
         /* Diffusion and decay times influences the decay rate (gain) of the
          * late reverb T60 filter.
          */
-        mParams.Diffusion != props->Reverb.Diffusion ||
-        mParams.DecayTime != props->Reverb.DecayTime ||
+        mParams.Diffusion != props.Diffusion ||
+        mParams.DecayTime != props.DecayTime ||
         mParams.HFDecayTime != hfDecayTime ||
         mParams.LFDecayTime != lfDecayTime ||
         /* Modulation time and depth both require fading the modulation delay. */
-        mParams.ModulationTime != props->Reverb.ModulationTime ||
-        mParams.ModulationDepth != props->Reverb.ModulationDepth ||
+        mParams.ModulationTime != props.ModulationTime ||
+        mParams.ModulationDepth != props.ModulationDepth ||
         /* HF/LF References control the weighting used to calculate the density
          * gain.
          */
-        mParams.HFReference != props->Reverb.HFReference ||
-        mParams.LFReference != props->Reverb.LFReference};
+        mParams.HFReference != props.HFReference ||
+        mParams.LFReference != props.LFReference};
     if(fullUpdate)
     {
-        mParams.Density = props->Reverb.Density;
-        mParams.Diffusion = props->Reverb.Diffusion;
-        mParams.DecayTime = props->Reverb.DecayTime;
+        mParams.Density = props.Density;
+        mParams.Diffusion = props.Diffusion;
+        mParams.DecayTime = props.DecayTime;
         mParams.HFDecayTime = hfDecayTime;
         mParams.LFDecayTime = lfDecayTime;
-        mParams.ModulationTime = props->Reverb.ModulationTime;
-        mParams.ModulationDepth = props->Reverb.ModulationDepth;
-        mParams.HFReference = props->Reverb.HFReference;
-        mParams.LFReference = props->Reverb.LFReference;
+        mParams.ModulationTime = props.ModulationTime;
+        mParams.ModulationDepth = props.ModulationDepth;
+        mParams.HFReference = props.HFReference;
+        mParams.LFReference = props.LFReference;
 
         mPipelineState = (mPipelineState != DeviceClear) ? StartFade : Normal;
-        mCurrentPipeline ^= 1;
+        mCurrentPipeline = !mCurrentPipeline;
     }
     auto &pipeline = mPipelines[mCurrentPipeline];
 
     /* Update early and late 3D panning. */
     mOutTarget = target.Main->Buffer;
-    const float gain{props->Reverb.Gain * Slot->Gain * ReverbBoost};
-    pipeline.update3DPanning(props->Reverb.ReflectionsPan, props->Reverb.LateReverbPan,
-        props->Reverb.ReflectionsGain*gain, props->Reverb.LateReverbGain*gain, mUpmixOutput,
-        target.Main);
+    const float gain{props.Gain * Slot->Gain * ReverbBoost};
+    pipeline.update3DPanning(props.ReflectionsPan, props.LateReverbPan, props.ReflectionsGain*gain,
+        props.LateReverbGain*gain, mUpmixOutput, target.Main);
 
     /* Calculate the master filters */
-    float hf0norm{minf(props->Reverb.HFReference/frequency, 0.49f)};
-    pipeline.mFilter[0].Lp.setParamsFromSlope(BiquadType::HighShelf, hf0norm, props->Reverb.GainHF, 1.0f);
-    float lf0norm{minf(props->Reverb.LFReference/frequency, 0.49f)};
-    pipeline.mFilter[0].Hp.setParamsFromSlope(BiquadType::LowShelf, lf0norm, props->Reverb.GainLF, 1.0f);
+    float hf0norm{minf(props.HFReference/frequency, 0.49f)};
+    pipeline.mFilter[0].Lp.setParamsFromSlope(BiquadType::HighShelf, hf0norm, props.GainHF, 1.0f);
+    float lf0norm{minf(props.LFReference/frequency, 0.49f)};
+    pipeline.mFilter[0].Hp.setParamsFromSlope(BiquadType::LowShelf, lf0norm, props.GainLF, 1.0f);
     for(size_t i{1u};i < NUM_LINES;i++)
     {
         pipeline.mFilter[i].Lp.copyParamsFrom(pipeline.mFilter[0].Lp);
@@ -1183,33 +1314,50 @@ void ReverbState::update(const ContextBase *Context, const EffectSlot *Slot,
     }
 
     /* The density-based room size (delay length) multiplier. */
-    const float density_mult{CalcDelayLengthMult(props->Reverb.Density)};
+    const float density_mult{CalcDelayLengthMult(props.Density)};
 
     /* Update the main effect delay and associated taps. */
-    pipeline.updateDelayLine(props->Reverb.ReflectionsDelay, props->Reverb.LateReverbDelay,
-        density_mult, props->Reverb.DecayTime, frequency);
+    pipeline.updateDelayLine(props.ReflectionsDelay, props.LateReverbDelay, density_mult,
+        props.DecayTime, frequency);
 
     if(fullUpdate)
     {
         /* Update the early lines. */
-        pipeline.mEarly.updateLines(density_mult, props->Reverb.Diffusion, props->Reverb.DecayTime,
-            frequency);
+        pipeline.mEarly.updateLines(density_mult, props.Diffusion, props.DecayTime, frequency);
 
         /* Get the mixing matrix coefficients. */
-        CalcMatrixCoeffs(props->Reverb.Diffusion, &pipeline.mMixX, &pipeline.mMixY);
+        CalcMatrixCoeffs(props.Diffusion, &pipeline.mMixX, &pipeline.mMixY);
 
         /* Update the modulator rate and depth. */
-        pipeline.mLate.Mod.updateModulator(props->Reverb.ModulationTime,
-            props->Reverb.ModulationDepth, frequency);
+        pipeline.mLate.Mod.updateModulator(props.ModulationTime, props.ModulationDepth, frequency);
 
         /* Update the late lines. */
-        pipeline.mLate.updateLines(density_mult, props->Reverb.Diffusion, lfDecayTime,
-            props->Reverb.DecayTime, hfDecayTime, lf0norm, hf0norm, frequency);
+        pipeline.mLate.updateLines(density_mult, props.Diffusion, lfDecayTime, props.DecayTime,
+            hfDecayTime, lf0norm, hf0norm, frequency);
     }
 
-    const float decaySamples{(props->Reverb.ReflectionsDelay + props->Reverb.LateReverbDelay
-        + props->Reverb.DecayTime) * frequency};
-    pipeline.mFadeSampleCount = static_cast<size_t>(minf(decaySamples, 1'000'000.0f));
+    /* Calculate the gain at the start of the late reverb stage, and the gain
+     * difference from the decay target (0.001, or -60dB).
+     */
+    const float decayBase{props.ReflectionsGain * props.LateReverbGain};
+    const float decayDiff{ReverbDecayGain / decayBase};
+
+    /* Given the DecayTime (the amount of time for the late reverb to decay by
+     * -60dB), calculate the time to decay to -60dB from the start of the late
+     * reverb.
+     *
+     * Otherwise, if the late reverb already starts at -60dB or less, only
+     * include the time to get to the late reverb.
+     */
+    const float diffTime{!(decayDiff < 1.0f) ? 0.0f
+        : (std::log10(decayDiff)*(20.0f / -60.0f) * props.DecayTime)};
+
+    const float decaySamples{(props.ReflectionsDelay+props.LateReverbDelay+diffTime)
+        * frequency};
+    /* Limit to 100,000 samples (a touch over 2 seconds at 48khz) to avoid
+     * excessive double-processing.
+     */
+    pipeline.mFadeSampleCount = static_cast<size_t>(std::min(decaySamples, 100'000.0f));
 }
 
 
@@ -1256,34 +1404,39 @@ void ReverbState::update(const ContextBase *Context, const EffectSlot *Slot,
  * whose combination of signs are being iterated.
  */
 inline auto VectorPartialScatter(const std::array<float,NUM_LINES> &RESTRICT in,
-    const float xCoeff, const float yCoeff) -> std::array<float,NUM_LINES>
+    const float xCoeff, const float yCoeff) noexcept
 {
-    return std::array<float,NUM_LINES>{{
+    return std::array{
         xCoeff*in[0] + yCoeff*(          in[1] + -in[2] + in[3]),
         xCoeff*in[1] + yCoeff*(-in[0]          +  in[2] + in[3]),
         xCoeff*in[2] + yCoeff*( in[0] + -in[1]          + in[3]),
         xCoeff*in[3] + yCoeff*(-in[0] + -in[1] + -in[2]        )
-    }};
+    };
 }
 
-/* Utilizes the above, but reverses the input channels. */
-void VectorScatterRevDelayIn(const DelayLineI delay, size_t offset, const float xCoeff,
-    const float yCoeff, const al::span<const ReverbUpdateLine,NUM_LINES> in, const size_t count)
+/* Utilizes the above, but also applies a geometric reflection on the input
+ * channels.
+ */
+void VectorScatterRev(const float xCoeff, const float yCoeff,
+    const al::span<ReverbUpdateLine,NUM_LINES> samples, const size_t count) noexcept
 {
     ASSUME(count > 0);
 
-    for(size_t i{0u};i < count;)
+    for(size_t i{0u};i < count;++i)
     {
-        offset &= delay.Mask;
-        size_t td{minz(delay.Mask+1 - offset, count-i)};
-        do {
-            std::array<float,NUM_LINES> f;
-            for(size_t j{0u};j < NUM_LINES;j++)
-                f[NUM_LINES-1-j] = in[j][i];
-            ++i;
+        std::array src{samples[0][i], samples[1][i], samples[2][i], samples[3][i]};
+        const std::array f{
+            (         src[1] + src[2] + src[3] - src[0]) * 0.5f,
+            (src[0] +          src[2] + src[3] - src[1]) * 0.5f,
+            (src[0] + src[1] +          src[3] - src[2]) * 0.5f,
+            (src[0] + src[1] + src[2]          - src[3]) * 0.5f
+        };
 
-            delay.Line[offset++] = VectorPartialScatter(f, xCoeff, yCoeff);
-        } while(--td);
+        src = VectorPartialScatter(f, xCoeff, yCoeff);
+        samples[0][i] = src[0];
+        samples[1][i] = src[1];
+        samples[2][i] = src[2];
+        samples[3][i] = src[3];
     }
 }
 
@@ -1293,19 +1446,16 @@ void VectorScatterRevDelayIn(const DelayLineI delay, size_t offset, const float 
  * It works by vectorizing a regular all-pass filter and replacing the delay
  * element with a scattering matrix (like the one above) and a diagonal
  * matrix of delay elements.
- *
- * Two static specializations are used for transitional (cross-faded) delay
- * line processing and non-transitional processing.
  */
 void VecAllpass::process(const al::span<ReverbUpdateLine,NUM_LINES> samples, size_t offset,
-    const float xCoeff, const float yCoeff, const size_t todo)
+    const float xCoeff, const float yCoeff, const size_t todo) noexcept
 {
     const DelayLineI delay{Delay};
     const float feedCoeff{Coeff};
 
     ASSUME(todo > 0);
 
-    size_t vap_offset[NUM_LINES];
+    std::array<size_t,NUM_LINES> vap_offset;
     for(size_t j{0u};j < NUM_LINES;j++)
         vap_offset[j] = offset - Offset[j];
     for(size_t i{0u};i < todo;)
@@ -1324,17 +1474,54 @@ void VecAllpass::process(const al::span<ReverbUpdateLine,NUM_LINES> samples, siz
             for(size_t j{0u};j < NUM_LINES;j++)
             {
                 const float input{samples[j][i]};
-                const float out{delay.Line[vap_offset[j]++][j] - feedCoeff*input};
+                const float out{delay.get(vap_offset[j]++, j) - feedCoeff*input};
                 f[j] = input + feedCoeff*out;
 
                 samples[j][i] = out;
             }
             ++i;
 
-            delay.Line[offset++] = VectorPartialScatter(f, xCoeff, yCoeff);
+            delay.set(offset++, VectorPartialScatter(f, xCoeff, yCoeff));
         } while(--td);
     }
 }
+
+/* This applies a more typical all-pass to each line, without the scattering
+ * matrix.
+ */
+void Allpass4::process(const al::span<ReverbUpdateLine,NUM_LINES> samples, size_t offset,
+    const size_t todo) noexcept
+{
+    const DelayLineU delay{Delay};
+    const float feedCoeff{Coeff};
+
+    ASSUME(todo > 0);
+
+    for(size_t j{0u};j < NUM_LINES;j++)
+    {
+        float *buffer{delay.get(j).data()};
+        size_t vap_offset{offset - Offset[j]};
+        for(size_t i{0u};i < todo;)
+        {
+            vap_offset &= delay.Mask;
+            offset &= delay.Mask;
+
+            const size_t maxoff{std::max(offset, vap_offset)};
+            size_t td{std::min(delay.Mask+1 - maxoff, todo - i)};
+
+            do {
+                const float x{samples[j][i]};
+                const float y{buffer[vap_offset++] - feedCoeff*x};
+                float f{x + feedCoeff*y};
+
+                samples[j][i++] = y;
+
+                buffer[offset++] = f;
+            } while(--td);
+        }
+    }
+}
+
 
 /* This generates early reflections.
  *
@@ -1342,22 +1529,21 @@ void VecAllpass::process(const al::span<ReverbUpdateLine,NUM_LINES> samples, siz
  * same direction as the source) from the main delay line.  These are
  * attenuated and all-pass filtered (based on the diffusion parameter).
  *
- * The early lines are then fed in reverse (according to the approximately
- * opposite spatial location of the A-Format lines) to create the secondary
+ * The early lines are then reflected about the origin to create the secondary
  * reflections (those arriving from the opposite direction as the source).
  *
  * The early response is then completed by combining the primary reflections
  * with the delayed and attenuated output from the early lines.
  *
- * Finally, the early response is reversed, scattered (based on diffusion),
+ * Finally, the early response is reflected, scattered (based on diffusion),
  * and fed into the late reverb section of the main delay line.
  */
 void ReverbPipeline::processEarly(size_t offset, const size_t samplesToDo,
     const al::span<ReverbUpdateLine, NUM_LINES> tempSamples,
     const al::span<FloatBufferLine, NUM_LINES> outSamples)
 {
-    const DelayLineI early_delay{mEarly.Delay};
-    const DelayLineI in_delay{mEarlyDelayIn};
+    const DelayLineU early_delay{mEarly.Delay};
+    const DelayLineU in_delay{mEarlyDelayIn};
     const float mixX{mMixX};
     const float mixY{mMixY};
 
@@ -1373,6 +1559,7 @@ void ReverbPipeline::processEarly(size_t offset, const size_t samplesToDo,
         const float fadeStep{1.0f / static_cast<float>(todo)};
         for(size_t j{0u};j < NUM_LINES;j++)
         {
+            const float *input{in_delay.get(j).data()};
             size_t early_delay_tap0{offset - mEarlyDelayTap[j][0]};
             size_t early_delay_tap1{offset - mEarlyDelayTap[j][1]};
             const float coeff{mEarlyDelayCoeff[j]};
@@ -1389,26 +1576,24 @@ void ReverbPipeline::processEarly(size_t offset, const size_t samplesToDo,
                     const float fade0{coeff - coeffStep*fadeCount};
                     const float fade1{coeffStep*fadeCount};
                     fadeCount += 1.0f;
-                    tempSamples[j][i++] = in_delay.Line[early_delay_tap0++][j]*fade0 +
-                        in_delay.Line[early_delay_tap1++][j]*fade1;
+                    tempSamples[j][i++] = input[early_delay_tap0++]*fade0 +
+                        input[early_delay_tap1++]*fade1;
                 } while(--td);
             }
 
             mEarlyDelayTap[j][0] = mEarlyDelayTap[j][1];
         }
 
-        /* Apply a vector all-pass, to help color the initial reflections based
-         * on the diffusion strength.
-         */
-        mEarly.VecAp.process(tempSamples, offset, mixX, mixY, todo);
+        /* Apply an all-pass, to help color the initial reflections. */
+        mEarly.VecAp.process(tempSamples, offset, todo);
 
         /* Apply a delay and bounce to generate secondary reflections, combine
          * with the primary reflections and write out the result for mixing.
          */
-        for(size_t j{0u};j < NUM_LINES;j++)
-            early_delay.write(offset, NUM_LINES-1-j, tempSamples[j].data(), todo);
+        early_delay.writeReflected(offset, tempSamples, todo);
         for(size_t j{0u};j < NUM_LINES;j++)
         {
+            const float *input{early_delay.get(j).data()};
             size_t feedb_tap{offset - mEarly.Offset[j]};
             const float feedb_coeff{mEarly.Coeff[j]};
             float *RESTRICT out{al::assume_aligned<16>(outSamples[j].data() + base)};
@@ -1418,8 +1603,9 @@ void ReverbPipeline::processEarly(size_t offset, const size_t samplesToDo,
                 feedb_tap &= early_delay.Mask;
                 size_t td{minz(early_delay.Mask+1 - feedb_tap, todo - i)};
                 do {
-                    tempSamples[j][i] += early_delay.Line[feedb_tap++][j]*feedb_coeff;
-                    out[i] = tempSamples[j][i];
+                    float sample{input[feedb_tap++]};
+                    out[i] = tempSamples[j][i] + sample*feedb_coeff;
+                    tempSamples[j][i] = sample;
                     ++i;
                 } while(--td);
             }
@@ -1429,7 +1615,9 @@ void ReverbPipeline::processEarly(size_t offset, const size_t samplesToDo,
          * reverb stage to pick up at the appropriate time, applying a scatter
          * and bounce to improve the initial diffusion in the late reverb.
          */
-        VectorScatterRevDelayIn(mLateDelayIn, offset, mixX, mixY, tempSamples, todo);
+        VectorScatterRev(mixX, mixY, tempSamples, todo);
+        for(size_t j{0u};j < NUM_LINES;j++)
+            mLateDelayIn.write(offset, j, tempSamples[j].data(), todo);
 
         base += todo;
         offset += todo;
@@ -1438,15 +1626,20 @@ void ReverbPipeline::processEarly(size_t offset, const size_t samplesToDo,
 
 void Modulation::calcDelays(size_t todo)
 {
-    constexpr float mod_scale{al::numbers::pi_v<float> * 2.0f / MOD_FRACONE};
     uint idx{Index};
     const uint step{Step};
-    const float depth{Depth};
+    const float depth{Depth * float{gCubicTable.sTableSteps}};
     for(size_t i{0};i < todo;++i)
     {
         idx += step;
-        const float lfo{std::sin(static_cast<float>(idx&MOD_FRACMASK) * mod_scale)};
-        ModDelays[i] = (lfo+1.0f) * depth;
+        const float x{static_cast<float>(idx&MOD_FRACMASK) * (1.0f/MOD_FRACONE)};
+        /* Approximate sin(x*2pi). As long as it roughly fits a sinusoid shape
+         * and stays within [-1...+1], it needn't be perfect.
+         */
+        const float lfo{!(idx&(MOD_FRACONE>>1))
+            ? ((-16.0f * x * x) + (8.0f * x))
+            : ((16.0f * x * x) + (-8.0f * x) + (-16.0f * x) + 8.0f)};
+        ModDelays[i] = float2uint((lfo+1.0f) * depth);
     }
     Index = idx;
 }
@@ -1467,8 +1660,8 @@ void ReverbPipeline::processLate(size_t offset, const size_t samplesToDo,
     const al::span<ReverbUpdateLine, NUM_LINES> tempSamples,
     const al::span<FloatBufferLine, NUM_LINES> outSamples)
 {
-    const DelayLineI late_delay{mLate.Delay};
-    const DelayLineI in_delay{mLateDelayIn};
+    const DelayLineU late_delay{mLate.Delay};
+    const DelayLineU in_delay{mLateDelayIn};
     const float mixX{mMixX};
     const float mixY{mMixY};
 
@@ -1482,17 +1675,49 @@ void ReverbPipeline::processLate(size_t offset, const size_t samplesToDo,
         /* First, calculate the modulated delays for the late feedback. */
         mLate.Mod.calcDelays(todo);
 
-        /* Next, load decorrelated samples from the main and feedback delay
-         * lines. Filter the signal to apply its frequency-dependent decay.
+        /* Now load samples from the feedback delay lines. Filter the signal to
+         * apply its frequency-dependent decay.
          */
-        const float fadeStep{1.0f / static_cast<float>(todo)};
-        for(size_t j{0u};j < NUM_LINES;j++)
+        for(size_t j{0u};j < NUM_LINES;++j)
         {
-            size_t late_delay_tap0{offset - mLateDelayTap[j][0]};
-            size_t late_delay_tap1{offset - mLateDelayTap[j][1]};
+            const float *input{late_delay.get(j).data()};
             size_t late_feedb_tap{offset - mLate.Offset[j]};
             const float midGain{mLate.T60[j].MidGain};
-            const float densityGain{mLate.DensityGain * midGain};
+
+            for(size_t i{0u};i < todo;++i)
+            {
+                /* Calculate the read offset and offset between it and the next
+                 * sample.
+                 */
+                const size_t idelay{mLate.Mod.ModDelays[i]};
+                const size_t delay{late_feedb_tap - (idelay>>gCubicTable.sTableBits)};
+                const size_t delayoffset{idelay & gCubicTable.sTableMask};
+                ++late_feedb_tap;
+
+                /* Get the samples around by the delayed offset. */
+                const float out0{input[(delay  ) & late_delay.Mask]};
+                const float out1{input[(delay-1) & late_delay.Mask]};
+                const float out2{input[(delay-2) & late_delay.Mask]};
+                const float out3{input[(delay-3) & late_delay.Mask]};
+
+                const float out{out0*gCubicTable.getCoeff0(delayoffset)
+                    + out1*gCubicTable.getCoeff1(delayoffset)
+                    + out2*gCubicTable.getCoeff2(delayoffset)
+                    + out3*gCubicTable.getCoeff3(delayoffset)};
+                tempSamples[j][i] = out * midGain;
+            }
+
+            mLate.T60[j].process({tempSamples[j].data(), todo});
+        }
+
+        /* Next load decorrelated samples from the main delay lines. */
+        const float fadeStep{1.0f / static_cast<float>(todo)};
+        for(size_t j{0u};j < NUM_LINES;++j)
+        {
+            const float *input{in_delay.get(j).data()};
+            size_t late_delay_tap0{offset - mLateDelayTap[j][0]};
+            size_t late_delay_tap1{offset - mLateDelayTap[j][1]};
+            const float densityGain{mLate.DensityGain};
             const float densityStep{late_delay_tap0 != late_delay_tap1 ?
                 densityGain*fadeStep : 0.0f};
             float fadeCount{0.0f};
@@ -1503,45 +1728,28 @@ void ReverbPipeline::processLate(size_t offset, const size_t samplesToDo,
                 late_delay_tap1 &= in_delay.Mask;
                 size_t td{minz(todo-i, in_delay.Mask+1 - maxz(late_delay_tap0, late_delay_tap1))};
                 do {
-                    /* Calculate the read offset and fraction between it and
-                     * the next sample.
-                     */
-                    const float fdelay{mLate.Mod.ModDelays[i]};
-                    const size_t delay{float2uint(fdelay)};
-                    const float frac{fdelay - static_cast<float>(delay)};
-
-                    /* Get the two samples crossed by the delayed offset. */
-                    const float out0{late_delay.Line[(late_feedb_tap-delay) & late_delay.Mask][j]};
-                    const float out1{late_delay.Line[(late_feedb_tap-delay-1) & late_delay.Mask][j]};
-                    ++late_feedb_tap;
-
-                    /* The output is obtained by linearly interpolating the two
-                     * samples that were acquired above, and combined with the
-                     * main delay tap.
-                     */
                     const float fade0{densityGain - densityStep*fadeCount};
                     const float fade1{densityStep*fadeCount};
                     fadeCount += 1.0f;
-                    tempSamples[j][i] = lerpf(out0, out1, frac)*midGain +
-                        in_delay.Line[late_delay_tap0++][j]*fade0 +
-                        in_delay.Line[late_delay_tap1++][j]*fade1;
+                    tempSamples[j][i] += input[late_delay_tap0++]*fade0 +
+                        input[late_delay_tap1++]*fade1;
                     ++i;
                 } while(--td);
             }
             mLateDelayTap[j][0] = mLateDelayTap[j][1];
-
-            mLate.T60[j].process({tempSamples[j].data(), todo});
         }
 
         /* Apply a vector all-pass to improve micro-surface diffusion, and
          * write out the results for mixing.
          */
         mLate.VecAp.process(tempSamples, offset, mixX, mixY, todo);
-        for(size_t j{0u};j < NUM_LINES;j++)
+        for(size_t j{0u};j < NUM_LINES;++j)
             std::copy_n(tempSamples[j].begin(), todo, outSamples[j].begin()+base);
 
         /* Finally, scatter and bounce the results to refeed the feedback buffer. */
-        VectorScatterRevDelayIn(late_delay, offset, mixX, mixY, tempSamples, todo);
+        VectorScatterRev(mixX, mixY, tempSamples, todo);
+        for(size_t j{0u};j < NUM_LINES;++j)
+            late_delay.write(offset, j, tempSamples[j].data(), todo);
 
         base += todo;
         offset += todo;
@@ -1554,7 +1762,7 @@ void ReverbState::process(const size_t samplesToDo, const al::span<const FloatBu
 
     ASSUME(samplesToDo > 0);
 
-    auto &oldpipeline = mPipelines[mCurrentPipeline^1];
+    auto &oldpipeline = mPipelines[!mCurrentPipeline];
     auto &pipeline = mPipelines[mCurrentPipeline];
 
     if(mPipelineState >= Fading)
@@ -1562,7 +1770,7 @@ void ReverbState::process(const size_t samplesToDo, const al::span<const FloatBu
         /* Convert B-Format to A-Format for processing. */
         const size_t numInput{minz(samplesIn.size(), NUM_LINES)};
         const al::span<float> tmpspan{al::assume_aligned<16>(mTempLine.data()), samplesToDo};
-        for(size_t c{0u};c < NUM_LINES;c++)
+        for(size_t c{0u};c < NUM_LINES;++c)
         {
             std::fill(tmpspan.begin(), tmpspan.end(), 0.0f);
             for(size_t i{0};i < numInput;++i)
@@ -1603,7 +1811,7 @@ void ReverbState::process(const size_t samplesToDo, const al::span<const FloatBu
         const al::span<float> tmpspan{al::assume_aligned<16>(mTempLine.data()), samplesToDo};
         const float fadeStep{1.0f / static_cast<float>(samplesToDo)};
 
-        for(size_t c{0u};c < NUM_LINES;c++)
+        for(size_t c{0u};c < NUM_LINES;++c)
         {
             std::fill(tmpspan.begin(), tmpspan.end(), 0.0f);
             for(size_t i{0};i < numInput;++i)
@@ -1627,7 +1835,7 @@ void ReverbState::process(const size_t samplesToDo, const al::span<const FloatBu
             filter.process(tmpspan, tmpspan.data());
             pipeline.mEarlyDelayIn.write(offset, c, tmpspan.cbegin(), samplesToDo);
         }
-        for(size_t c{0u};c < NUM_LINES;c++)
+        for(size_t c{0u};c < NUM_LINES;++c)
         {
             std::fill(tmpspan.begin(), tmpspan.end(), 0.0f);
             for(size_t i{0};i < numInput;++i)
@@ -1664,7 +1872,7 @@ void ReverbState::process(const size_t samplesToDo, const al::span<const FloatBu
         if(mPipelineState == Cleanup)
         {
             size_t numSamples{mSampleBuffer.size()/2};
-            size_t pipelineOffset{numSamples * (mCurrentPipeline^1)};
+            size_t pipelineOffset{numSamples * (!mCurrentPipeline)};
             std::fill_n(mSampleBuffer.data()+pipelineOffset, numSamples,
                 decltype(mSampleBuffer)::value_type{});
 
@@ -1680,10 +1888,10 @@ void ReverbState::process(const size_t samplesToDo, const al::span<const FloatBu
              */
             if(samplesToDo >= oldpipeline.mFadeSampleCount)
             {
-                for(auto &gains : oldpipeline.mEarly.TargetGains)
-                    std::fill(std::begin(gains), std::end(gains), 0.0f);
-                for(auto &gains : oldpipeline.mLate.TargetGains)
-                    std::fill(std::begin(gains), std::end(gains), 0.0f);
+                for(auto &gains : oldpipeline.mEarly.Gains)
+                    std::fill(gains.Target.begin(), gains.Target.end(), 0.0f);
+                for(auto &gains : oldpipeline.mLate.Gains)
+                    std::fill(gains.Target.begin(), gains.Target.end(), 0.0f);
                 oldpipeline.mFadeSampleCount = 0;
                 mPipelineState = Cleanup;
             }

@@ -11,14 +11,14 @@ namespace al {
 
 template<typename T>
 class intrusive_ref {
-    RefCount mRef{1u};
+    std::atomic<unsigned int> mRef{1u};
 
 public:
     unsigned int add_ref() noexcept { return IncrementRef(mRef); }
     unsigned int dec_ref() noexcept
     {
         auto ref = DecrementRef(mRef);
-        if(ref == 0) [[unlikely]]
+        if(ref == 0) UNLIKELY
             delete static_cast<T*>(this);
         return ref;
     }
@@ -60,6 +60,9 @@ public:
     explicit intrusive_ptr(T *ptr) noexcept : mPtr{ptr} { }
     ~intrusive_ptr() { if(mPtr) mPtr->dec_ref(); }
 
+    /* NOLINTBEGIN(bugprone-unhandled-self-assignment)
+     * Self-assignment is handled properly here.
+     */
     intrusive_ptr& operator=(const intrusive_ptr &rhs) noexcept
     {
         static_assert(noexcept(std::declval<T*>()->dec_ref()), "dec_ref must be noexcept");
@@ -69,9 +72,10 @@ public:
         mPtr = rhs.mPtr;
         return *this;
     }
+    /* NOLINTEND(bugprone-unhandled-self-assignment) */
     intrusive_ptr& operator=(intrusive_ptr&& rhs) noexcept
     {
-        if(&rhs != this) [[likely]]
+        if(&rhs != this) LIKELY
         {
             if(mPtr) mPtr->dec_ref();
             mPtr = std::exchange(rhs.mPtr, nullptr);
@@ -81,9 +85,9 @@ public:
 
     explicit operator bool() const noexcept { return mPtr != nullptr; }
 
-    T& operator*() const noexcept { return *mPtr; }
-    T* operator->() const noexcept { return mPtr; }
-    T* get() const noexcept { return mPtr; }
+    [[nodiscard]] auto operator*() const noexcept -> T& { return *mPtr; }
+    [[nodiscard]] auto operator->() const noexcept -> T* { return mPtr; }
+    [[nodiscard]] auto get() const noexcept -> T* { return mPtr; }
 
     void reset(T *ptr=nullptr) noexcept
     {

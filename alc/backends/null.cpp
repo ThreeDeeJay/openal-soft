@@ -30,10 +30,10 @@
 #include <functional>
 #include <thread>
 
-#include "core/device.h"
+#include "althrd_setname.h"
 #include "almalloc.h"
+#include "core/device.h"
 #include "core/helpers.h"
-#include "threads.h"
 
 
 namespace {
@@ -41,8 +41,9 @@ namespace {
 using std::chrono::seconds;
 using std::chrono::milliseconds;
 using std::chrono::nanoseconds;
+using namespace std::string_view_literals;
 
-constexpr char nullDevice[] = "No Output";
+[[nodiscard]] constexpr auto GetDeviceName() noexcept { return "No Output"sv; }
 
 
 struct NullBackend final : public BackendBase {
@@ -50,15 +51,13 @@ struct NullBackend final : public BackendBase {
 
     int mixerProc();
 
-    void open(const char *name) override;
+    void open(std::string_view name) override;
     bool reset() override;
     void start() override;
     void stop() override;
 
     std::atomic<bool> mKillNow{true};
     std::thread mThread;
-
-    DEF_NEWDEL(NullBackend)
 };
 
 int NullBackend::mixerProc()
@@ -105,13 +104,13 @@ int NullBackend::mixerProc()
 }
 
 
-void NullBackend::open(const char *name)
+void NullBackend::open(std::string_view name)
 {
-    if(!name)
-        name = nullDevice;
-    else if(strcmp(name, nullDevice) != 0)
-        throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%s\" not found",
-            name};
+    if(name.empty())
+        name = GetDeviceName();
+    else if(name != GetDeviceName())
+        throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%.*s\" not found",
+            static_cast<int>(name.length()), name.data()};
 
     mDevice->DeviceName = name;
 }
@@ -152,17 +151,15 @@ bool NullBackendFactory::querySupport(BackendType type)
 
 std::string NullBackendFactory::probe(BackendType type)
 {
-    std::string outnames;
     switch(type)
     {
     case BackendType::Playback:
-        /* Includes null char. */
-        outnames.append(nullDevice, sizeof(nullDevice));
-        break;
+        /* Include null char. */
+        return std::string{GetDeviceName()} + '\0';
     case BackendType::Capture:
         break;
     }
-    return outnames;
+    return std::string{};
 }
 
 BackendPtr NullBackendFactory::createBackend(DeviceBase *device, BackendType type)

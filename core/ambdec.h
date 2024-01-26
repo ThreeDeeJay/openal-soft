@@ -3,9 +3,10 @@
 
 #include <array>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
-#include "aloptional.h"
 #include "core/ambidefs.h"
 
 /* Helpers to read .ambdec configuration files. */
@@ -34,22 +35,21 @@ struct AmbDecConf {
         float Elevation{0.0f};
         std::string Connection;
     };
-    size_t NumSpeakers{0};
-    std::unique_ptr<SpeakerConf[]> Speakers;
+    std::vector<SpeakerConf> Speakers;
 
     using CoeffArray = std::array<float,MaxAmbiChannels>;
-    std::unique_ptr<CoeffArray[]> Matrix;
+    std::vector<CoeffArray> Matrix;
 
     /* Unused when FreqBands == 1 */
-    float LFOrderGain[MaxAmbiOrder+1]{};
+    std::array<float,MaxAmbiOrder+1> LFOrderGain{};
     CoeffArray *LFMatrix;
 
-    float HFOrderGain[MaxAmbiOrder+1]{};
+    std::array<float,MaxAmbiOrder+1> HFOrderGain{};
     CoeffArray *HFMatrix;
 
     ~AmbDecConf();
 
-    al::optional<std::string> load(const char *fname) noexcept;
+    std::optional<std::string> load(const char *fname) noexcept;
 };
 
 #endif /* CORE_AMBDEC_H */

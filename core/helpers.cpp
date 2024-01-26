@@ -3,29 +3,28 @@
 
 #include "helpers.h"
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #include <algorithm>
-#include <cerrno>
-#include <cstdarg>
 #include <cstdlib>
-#include <cstdio>
 #include <cstring>
-#include <mutex>
 #include <limits>
+#include <mutex>
+#include <optional>
 #include <string>
-#include <tuple>
 
 #include "almalloc.h"
-#include "alfstream.h"
 #include "alnumeric.h"
-#include "aloptional.h"
 #include "alspan.h"
 #include "alstring.h"
 #include "logging.h"
 #include "strutils.h"
-#include "vector.h"
 
 
-/* Mixing thread piority level */
+/* Mixing thread priority level */
 int RTPrioLevel{1};
 
 /* Allow reducing the process's RTTime limit for RTKit. */
@@ -34,14 +33,15 @@ bool AllowRTTimeLimit{true};
 
 #ifdef _WIN32
 
+#include <cctype>
 #include <shlobj.h>
 
 const PathNamePair &GetProcBinary()
 {
-    static al::optional<PathNamePair> procbin;
+    static std::optional<PathNamePair> procbin;
     if(procbin) return *procbin;
-
-    auto fullpath = al::vector<WCHAR>(256);
+#if !defined(ALSOFT_UWP)
+    auto fullpath = std::vector<WCHAR>(256);
     DWORD len{GetModuleFileNameW(nullptr, fullpath.data(), static_cast<DWORD>(fullpath.size()))};
     while(len == fullpath.size())
     {
@@ -58,7 +58,16 @@ const PathNamePair &GetProcBinary()
     fullpath.resize(len);
     if(fullpath.back() != 0)
         fullpath.push_back(0);
-
+#else
+    auto exePath               = __wargv[0];
+    if (!exePath)
+    {
+        ERR("Failed to get process name: error %lu\n", GetLastError());
+        procbin.emplace();
+        return *procbin;
+    }
+    std::vector<WCHAR> fullpath{exePath, exePath + wcslen(exePath) + 1};
+#endif
     std::replace(fullpath.begin(), fullpath.end(), '/', '\\');
     auto sep = std::find(fullpath.rbegin()+1, fullpath.rend(), '\\');
     if(sep != fullpath.rend())
@@ -75,29 +84,33 @@ const PathNamePair &GetProcBinary()
 
 namespace {
 
-void DirectorySearch(const char *path, const char *ext, al::vector<std::string> *const results)
+#if !defined(ALSOFT_UWP) && !defined(_GAMING_XBOX)
+struct CoTaskMemDeleter {
+    void operator()(void *mem) const { CoTaskMemFree(mem); }
+};
+#endif
+
+void DirectorySearch(const std::string_view path, const char *ext,
+    std::vector<std::string> *const results)
 {
     std::string pathstr{path};
     pathstr += "\\*";
     pathstr += ext;
     TRACE("Searching %s\n", pathstr.c_str());
 
-    std::wstring wpath{utf8_to_wstr(pathstr.c_str())};
+    std::wstring wpath{utf8_to_wstr(pathstr)};
     WIN32_FIND_DATAW fdata;
-    HANDLE hdl{FindFirstFileW(wpath.c_str(), &fdata)};
+    HANDLE hdl{FindFirstFileExW(wpath.c_str(), FindExInfoStandard, &fdata, FindExSearchNameMatch, NULL, 0)};
     if(hdl == INVALID_HANDLE_VALUE) return;
 
     const auto base = results->size();
 
     do {
-        results->emplace_back();
-        std::string &str = results->back();
-        str = path;
+        std::string &str = results->emplace_back(path);
         str += '\\';
         str += wstr_to_utf8(fdata.cFileName);
     } while(FindNextFileW(hdl, &fdata));
     FindClose(hdl);
-
     const al::span<std::string> newlist{results->data()+base, results->size()-base};
     std::sort(newlist.begin(), newlist.end());
     for(const auto &name : newlist)
@@ -106,16 +119,16 @@ void DirectorySearch(const char *path, const char *ext, al::vector<std::string> 
 
 } // namespace
 
-al::vector<std::string> SearchDataFiles(const char *ext, const char *subdir)
+std::vector<std::string> SearchDataFiles(const char *ext, const char *subdir)
 {
-    auto is_slash = [](int c) noexcept -> int { return (c == '\\' || c == '/'); };
+    auto is_slash = [](int c) noexcept { return (c == '\\' || c == '/'); };
 
-    static std::mutex search_lock;
-    std::lock_guard<std::mutex> _{search_lock};
+    static std::mutex sSearchLock;
+    std::lock_guard<std::mutex> srchlock{sSearchLock};
 
     /* If the path is absolute, use it directly. */
-    al::vector<std::string> results;
-    if(isalpha(subdir[0]) && subdir[1] == ':' && is_slash(subdir[2]))
+    std::vector<std::string> results;
+    if(std::isalpha(subdir[0]) && subdir[1] == ':' && is_slash(subdir[2]))
     {
         std::string path{subdir};
         std::replace(path.begin(), path.end(), '/', '\\');
@@ -133,7 +146,7 @@ al::vector<std::string> SearchDataFiles(const char *ext, const char *subdir)
     /* Search the app-local directory. */
     if(auto localpath = al::getenv(L"ALSOFT_LOCAL_PATH"))
     {
-        path = wstr_to_utf8(localpath->c_str());
+        path = wstr_to_utf8(*localpath);
         if(is_slash(path.back()))
             path.pop_back();
     }
@@ -147,42 +160,45 @@ al::vector<std::string> SearchDataFiles(const char *ext, const char *subdir)
     else
         path = ".";
     std::replace(path.begin(), path.end(), '/', '\\');
-    DirectorySearch(path.c_str(), ext, &results);
+    DirectorySearch(path, ext, &results);
 
+#if !defined(ALSOFT_UWP) && !defined(_GAMING_XBOX)
     /* Search the local and global data dirs. */
-    static const int ids[2]{ CSIDL_APPDATA, CSIDL_COMMON_APPDATA };
-    for(int id : ids)
+    for(const auto &folderid : std::array{FOLDERID_RoamingAppData, FOLDERID_ProgramData})
     {
-        WCHAR buffer[MAX_PATH];
-        if(SHGetSpecialFolderPathW(nullptr, buffer, id, FALSE) == FALSE)
-            continue;
+        std::unique_ptr<WCHAR,CoTaskMemDeleter> buffer;
+        const HRESULT hr{SHGetKnownFolderPath(folderid, KF_FLAG_DONT_UNEXPAND, nullptr,
+            al::out_ptr(buffer))};
+        if(FAILED(hr)) continue;
 
-        path = wstr_to_utf8(buffer);
-        if(!is_slash(path.back()))
-            path += '\\';
+        path = wstr_to_utf8(buffer.get());
+        path += '\\';
         path += subdir;
         std::replace(path.begin(), path.end(), '/', '\\');
 
-        DirectorySearch(path.c_str(), ext, &results);
+        DirectorySearch(path, ext, &results);
     }
+#endif
 
     return results;
 }
 
-void SetRTPriority(void)
+void SetRTPriority()
 {
+#if !defined(ALSOFT_UWP)
     if(RTPrioLevel > 0)
     {
         if(!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL))
             ERR("Failed to set priority level for thread\n");
     }
+#endif
 }
 
 #else
 
-#include <sys/types.h>
-#include <unistd.h>
+#include <cerrno>
 #include <dirent.h>
+#include <unistd.h>
 #ifdef __FreeBSD__
 #include <sys/sysctl.h>
 #endif
@@ -197,7 +213,6 @@ void SetRTPriority(void)
 #include <sched.h>
 #endif
 #ifdef HAVE_RTKIT
-#include <sys/time.h>
 #include <sys/resource.h>
 
 #include "dbus_wrap.h"
@@ -209,10 +224,10 @@ void SetRTPriority(void)
 
 const PathNamePair &GetProcBinary()
 {
-    static al::optional<PathNamePair> procbin;
+    static std::optional<PathNamePair> procbin;
     if(procbin) return *procbin;
 
-    al::vector<char> pathname;
+    std::vector<char> pathname;
 #ifdef __FreeBSD__
     size_t pathlen;
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
@@ -247,7 +262,7 @@ const PathNamePair &GetProcBinary()
 #ifndef __SWITCH__
     if(pathname.empty())
     {
-        static const char SelfLinkNames[][32]{
+        std::array SelfLinkNames{
             "/proc/self/exe",
             "/proc/self/file",
             "/proc/curproc/exe",
@@ -295,35 +310,30 @@ const PathNamePair &GetProcBinary()
 
 namespace {
 
-void DirectorySearch(const char *path, const char *ext, al::vector<std::string> *const results)
+void DirectorySearch(const char *path, const char *ext, std::vector<std::string> *const results)
 {
     TRACE("Searching %s for *%s\n", path, ext);
     DIR *dir{opendir(path)};
     if(!dir) return;
 
-    const auto base = results->size();
-    const size_t extlen{strlen(ext)};
-
+    const std::string_view extsv{ext};
+    const auto base = static_cast<std::make_signed_t<size_t>>(results->size());
     while(struct dirent *dirent{readdir(dir)})
     {
-        if(strcmp(dirent->d_name, ".") == 0 || strcmp(dirent->d_name, "..") == 0)
+        const std::string_view d_name{std::data(dirent->d_name)};
+        if(d_name == "." || d_name == "..") continue;
+
+        if(d_name.size() <= extsv.size()) continue;
+        if(al::case_compare(d_name.substr(d_name.size()-extsv.size()), extsv) != 0)
             continue;
 
-        const size_t len{strlen(dirent->d_name)};
-        if(len <= extlen) continue;
-        if(al::strcasecmp(dirent->d_name+len-extlen, ext) != 0)
-            continue;
-
-        results->emplace_back();
-        std::string &str = results->back();
-        str = path;
-        if(str.back() != '/')
-            str.push_back('/');
-        str += dirent->d_name;
+        std::string &str = results->emplace_back(path);
+        if(str.back() != '/') str.push_back('/');
+        str += d_name;
     }
     closedir(dir);
 
-    const al::span<std::string> newlist{results->data()+base, results->size()-base};
+    const al::span newlist{results->begin()+base, results->end()};
     std::sort(newlist.begin(), newlist.end());
     for(const auto &name : newlist)
         TRACE(" got %s\n", name.c_str());
@@ -331,12 +341,12 @@ void DirectorySearch(const char *path, const char *ext, al::vector<std::string> 
 
 } // namespace
 
-al::vector<std::string> SearchDataFiles(const char *ext, const char *subdir)
+std::vector<std::string> SearchDataFiles(const char *ext, const char *subdir)
 {
-    static std::mutex search_lock;
-    std::lock_guard<std::mutex> _{search_lock};
+    static std::mutex sSearchLock;
+    std::lock_guard<std::mutex> srchlock{sSearchLock};
 
-    al::vector<std::string> results;
+    std::vector<std::string> results;
     if(subdir[0] == '/')
     {
         DirectorySearch(subdir, ext, &results);
@@ -348,7 +358,7 @@ al::vector<std::string> SearchDataFiles(const char *ext, const char *subdir)
         DirectorySearch(localpath->c_str(), ext, &results);
     else
     {
-        al::vector<char> cwdbuf(256);
+        std::vector<char> cwdbuf(256);
         while(!getcwd(cwdbuf.data(), cwdbuf.size()))
         {
             if(errno != ERANGE)
@@ -425,7 +435,7 @@ al::vector<std::string> SearchDataFiles(const char *ext, const char *subdir)
 
 namespace {
 
-bool SetRTPriorityPthread(int prio)
+bool SetRTPriorityPthread(int prio [[maybe_unused]])
 {
     int err{ENOTSUP};
 #if defined(HAVE_PTHREAD_SETSCHEDPARAM) && !defined(__OpenBSD__)
@@ -445,16 +455,12 @@ bool SetRTPriorityPthread(int prio)
 #endif
         err = pthread_setschedparam(pthread_self(), SCHED_RR, &param);
     if(err == 0) return true;
-
-#else
-
-    std::ignore = prio;
 #endif
     WARN("pthread_setschedparam failed: %s (%d)\n", std::strerror(err), err);
     return false;
 }
 
-bool SetRTPriorityRTKit(int prio)
+bool SetRTPriorityRTKit(int prio [[maybe_unused]])
 {
 #ifdef HAVE_RTKIT
     if(!HasDBus())
@@ -547,7 +553,6 @@ bool SetRTPriorityRTKit(int prio)
 
 #else
 
-    std::ignore = prio;
     WARN("D-Bus not supported\n");
 #endif
     return false;

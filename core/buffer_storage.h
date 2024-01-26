@@ -2,9 +2,10 @@
 #define CORE_BUFFER_STORAGE_H
 
 #include <atomic>
+#include <cstddef>
 
-#include "albyte.h"
 #include "alnumeric.h"
+#include "alspan.h"
 #include "ambidefs.h"
 
 
@@ -14,10 +15,13 @@ using uint = unsigned int;
 enum FmtType : unsigned char {
     FmtUByte,
     FmtShort,
+    FmtInt,
     FmtFloat,
     FmtDouble,
     FmtMulaw,
     FmtAlaw,
+    FmtIMA4,
+    FmtMSADPCM,
 };
 enum FmtChannels : unsigned char {
     FmtMono,
@@ -45,6 +49,9 @@ enum class AmbiScaling : unsigned char {
     N3D,
     UHJ,
 };
+
+const char *NameFromFormat(FmtType type) noexcept;
+const char *NameFromFormat(FmtChannels channels) noexcept;
 
 uint BytesFromFmt(FmtType type) noexcept;
 uint ChannelsFromFmt(FmtChannels chans, uint ambiorder) noexcept;
@@ -79,21 +86,31 @@ struct BufferStorage {
     CallbackType mCallback{nullptr};
     void *mUserData{nullptr};
 
+    al::span<std::byte> mData;
+
     uint mSampleRate{0u};
     FmtChannels mChannels{FmtMono};
     FmtType mType{FmtShort};
     uint mSampleLen{0u};
+    uint mBlockAlign{0u};
 
     AmbiLayout mAmbiLayout{AmbiLayout::FuMa};
     AmbiScaling mAmbiScaling{AmbiScaling::FuMa};
     uint mAmbiOrder{0u};
 
-    inline uint bytesFromFmt() const noexcept { return BytesFromFmt(mType); }
-    inline uint channelsFromFmt() const noexcept
+    [[nodiscard]] auto bytesFromFmt() const noexcept -> uint { return BytesFromFmt(mType); }
+    [[nodiscard]] auto channelsFromFmt() const noexcept -> uint
     { return ChannelsFromFmt(mChannels, mAmbiOrder); }
-    inline uint frameSizeFromFmt() const noexcept { return channelsFromFmt() * bytesFromFmt(); }
+    [[nodiscard]] auto frameSizeFromFmt() const noexcept -> uint { return channelsFromFmt() * bytesFromFmt(); }
 
-    inline bool isBFormat() const noexcept { return IsBFormat(mChannels); }
+    [[nodiscard]] auto blockSizeFromFmt() const noexcept -> uint
+    {
+        if(mType == FmtIMA4) return ((mBlockAlign-1)/2 + 4) * channelsFromFmt();
+        if(mType == FmtMSADPCM) return ((mBlockAlign-2)/2 + 7) * channelsFromFmt();
+        return frameSizeFromFmt();
+    };
+
+    [[nodiscard]] auto isBFormat() const noexcept -> bool { return IsBFormat(mChannels); }
 };
 
 #endif /* CORE_BUFFER_STORAGE_H */
