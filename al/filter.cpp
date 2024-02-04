@@ -49,7 +49,7 @@
 
 namespace {
 
-using SubListAllocator = typename al::allocator<std::array<ALfilter,64>>;
+using SubListAllocator = al::allocator<std::array<ALfilter,64>>;
 
 class filter_exception final : public al::base_exception {
     ALenum mErrorCode;
@@ -135,7 +135,7 @@ bool EnsureFilters(ALCdevice *device, size_t needed)
             sublist.FreeMask = ~0_u64;
             sublist.Filters = SubListAllocator{}.allocate(1);
             device->FilterList.emplace_back(std::move(sublist));
-            count += 64;
+            count += std::tuple_size_v<SubListAllocator::value_type>;
         }
     }
     catch(...) {

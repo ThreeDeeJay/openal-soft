@@ -29,12 +29,13 @@
 #include "albit.h"
 #include "alc/alconfig.h"
 #include "alnumeric.h"
+#include "alstring.h"
 #include "core/device.h"
 #include "core/logging.h"
 #include "dynload.h"
 #include "ringbuffer.h"
 
-#include <portaudio.h>
+#include <portaudio.h> /* NOLINT(*-duplicate-include) Not the same header. */
 
 
 namespace {
@@ -115,7 +116,7 @@ void PortPlayback::open(std::string_view name)
         name = GetDefaultName();
     else if(name != GetDefaultName())
         throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%.*s\" not found",
-            static_cast<int>(name.length()), name.data()};
+            al::sizei(name), name.data()};
 
     PaStreamParameters params{};
     auto devidopt = ConfigValueInt({}, "port", "device");
@@ -231,7 +232,7 @@ struct PortCapture final : public BackendBase {
     ~PortCapture() override;
 
     int readCallback(const void *inputBuffer, void *outputBuffer, unsigned long framesPerBuffer,
-        const PaStreamCallbackTimeInfo *timeInfo, const PaStreamCallbackFlags statusFlags) noexcept;
+        const PaStreamCallbackTimeInfo *timeInfo, const PaStreamCallbackFlags statusFlags) const noexcept;
 
     void open(std::string_view name) override;
     void start() override;
@@ -255,7 +256,7 @@ PortCapture::~PortCapture()
 
 
 int PortCapture::readCallback(const void *inputBuffer, void*, unsigned long framesPerBuffer,
-    const PaStreamCallbackTimeInfo*, const PaStreamCallbackFlags) noexcept
+    const PaStreamCallbackTimeInfo*, const PaStreamCallbackFlags) const noexcept
 {
     std::ignore = mRing->write(inputBuffer, framesPerBuffer);
     return 0;
@@ -268,11 +269,10 @@ void PortCapture::open(std::string_view name)
         name = GetDefaultName();
     else if(name != GetDefaultName())
         throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%.*s\" not found",
-            static_cast<int>(name.length()), name.data()};
+            al::sizei(name), name.data()};
 
-    uint samples{mDevice->BufferSize};
-    samples = maxu(samples, 100 * mDevice->Frequency / 1000);
-    uint frame_size{mDevice->frameSizeFromFmt()};
+    const uint samples{std::max(mDevice->BufferSize, mDevice->Frequency/10u)};
+    const uint frame_size{mDevice->frameSizeFromFmt()};
 
     mRing = RingBuffer::Create(samples, frame_size, false);
 

@@ -76,8 +76,7 @@ void DistortionState::update(const ContextBase *context, const EffectSlot *slot,
     const DeviceBase *device{context->mDevice};
 
     /* Store waveshaper edge settings. */
-    const float edge{minf(std::sin(al::numbers::pi_v<float>*0.5f * props.Edge),
-        0.99f)};
+    const float edge{std::min(std::sin(al::numbers::pi_v<float>*0.5f * props.Edge), 0.99f)};
     mEdgeCoeff = 2.0f * edge / (1.0f-edge);
 
     float cutoff{props.LowpassCutoff};
@@ -110,7 +109,7 @@ void DistortionState::process(const size_t samplesToDo, const al::span<const Flo
          * bandpass filters using high frequencies, at which classic IIR
          * filters became unstable.
          */
-        size_t todo{minz(BufferLineSize, (samplesToDo-base) * 4)};
+        size_t todo{std::min(BufferLineSize, (samplesToDo-base) * 4_uz)};
 
         /* Fill oversample buffer using zero stuffing. Multiply the sample by
          * the amount of oversampling to maintain the signal's power.

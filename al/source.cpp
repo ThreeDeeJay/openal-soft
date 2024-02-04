@@ -74,13 +74,10 @@
 #include "opthelpers.h"
 #include "ringbuffer.h"
 
-#ifdef ALSOFT_EAX
-#include <cassert>
-#endif // ALSOFT_EAX
 
 namespace {
 
-using SubListAllocator = typename al::allocator<std::array<ALsource,64>>;
+using SubListAllocator = al::allocator<std::array<ALsource,64>>;
 using std::chrono::nanoseconds;
 using seconds_d = std::chrono::duration<double>;
 
@@ -334,7 +331,7 @@ NOINLINE T GetSourceOffset(ALsource *Source, ALenum name, ALCcontext *context)
         else
         {
             readPos /= BufferFmt->mSampleRate;
-            offset = static_cast<T>(clampi64(readPos, std::numeric_limits<T>::min(),
+            offset = static_cast<T>(std::clamp<int64_t>(readPos, std::numeric_limits<T>::min(),
                 std::numeric_limits<T>::max()));
         }
         break;
@@ -343,7 +340,7 @@ NOINLINE T GetSourceOffset(ALsource *Source, ALenum name, ALCcontext *context)
         if constexpr(std::is_floating_point_v<T>)
             offset = static_cast<T>(readPos) + static_cast<T>(readPosFrac)/T{MixerFracOne};
         else
-            offset = static_cast<T>(clampi64(readPos, std::numeric_limits<T>::min(),
+            offset = static_cast<T>(std::clamp<int64_t>(readPos, std::numeric_limits<T>::min(),
                 std::numeric_limits<T>::max()));
         break;
 
@@ -395,14 +392,14 @@ NOINLINE T GetSourceLength(const ALsource *source, ALenum name)
         if constexpr(std::is_floating_point_v<T>)
             return static_cast<T>(length) / static_cast<T>(BufferFmt->mSampleRate);
         else
-            return static_cast<T>(minu64(length/BufferFmt->mSampleRate,
+            return static_cast<T>(std::min<uint64_t>(length/BufferFmt->mSampleRate,
                 std::numeric_limits<T>::max()));
 
     case AL_SAMPLE_LENGTH_SOFT:
         if constexpr(std::is_floating_point_v<T>)
             return static_cast<T>(length);
         else
-            return static_cast<T>(minu64(length, std::numeric_limits<T>::max()));
+            return static_cast<T>(std::min<uint64_t>(length, std::numeric_limits<T>::max()));
 
     case AL_BYTE_LENGTH_SOFT:
         const ALuint BlockSamples{BufferFmt->mBlockAlign};
@@ -467,7 +464,7 @@ std::optional<VoicePos> GetSampleOffset(std::deque<ALbufferQueueItem> &BufferLis
             dblfrac += 1.0;
         }
         offset = static_cast<int64_t>(dbloff);
-        frac = static_cast<uint>(mind(dblfrac*MixerFracOne, MixerFracOne-1.0));
+        frac = static_cast<uint>(std::min(dblfrac*MixerFracOne, MixerFracOne-1.0));
         break;
 
     case AL_SAMPLE_OFFSET:
@@ -478,7 +475,7 @@ std::optional<VoicePos> GetSampleOffset(std::deque<ALbufferQueueItem> &BufferLis
             dblfrac += 1.0;
         }
         offset = static_cast<int64_t>(dbloff);
-        frac = static_cast<uint>(mind(dblfrac*MixerFracOne, MixerFracOne-1.0));
+        frac = static_cast<uint>(std::min(dblfrac*MixerFracOne, MixerFracOne-1.0));
         break;
 
     case AL_BYTE_OFFSET:
@@ -731,7 +728,7 @@ bool EnsureSources(ALCcontext *context, size_t needed)
             sublist.FreeMask = ~0_u64;
             sublist.Sources = SubListAllocator{}.allocate(1);
             context->mSourceList.emplace_back(std::move(sublist));
-            count += 64;
+            count += std::tuple_size_v<SubListAllocator::value_type>;
         }
     }
     catch(...) {
@@ -4013,11 +4010,9 @@ EaxAlLowPassParam ALsource::eax_create_direct_filter_param() const noexcept
         }
     }
 
-    const auto al_low_pass_param = EaxAlLowPassParam{
+    return EaxAlLowPassParam{
         level_mb_to_gain(gain_mb),
-        minf(level_mb_to_gain(gain_hf_mb), 1.0f)};
-
-    return al_low_pass_param;
+        std::min(level_mb_to_gain(gain_hf_mb), 1.0f)};
 }
 
 EaxAlLowPassParam ALsource::eax_create_room_filter_param(
@@ -4058,11 +4053,9 @@ EaxAlLowPassParam ALsource::eax_create_room_filter_param(
             static_cast<float>(mEax.source.lExclusion + send.lExclusion) :
             0.0f);
 
-    const auto al_low_pass_param = EaxAlLowPassParam{
+    return EaxAlLowPassParam{
         level_mb_to_gain(gain_mb),
-        minf(level_mb_to_gain(gain_hf_mb), 1.0f)};
-
-    return al_low_pass_param;
+        std::min(level_mb_to_gain(gain_hf_mb), 1.0f)};
 }
 
 void ALsource::eax_update_direct_filter()

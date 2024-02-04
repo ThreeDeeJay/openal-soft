@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "almalloc.h"
@@ -42,7 +43,7 @@ struct alignas(16) HrtfStore {
     const ubyte2 *mDelays;
 
     void getCoeffs(float elevation, float azimuth, float distance, float spread, HrirArray &coeffs,
-        const al::span<uint,2> delays);
+        const al::span<uint,2> delays) const;
 
     void add_ref();
     void dec_ref();
@@ -93,6 +94,6 @@ struct DirectHrtfState {
 
 
 std::vector<std::string> EnumerateHrtf(std::optional<std::string> pathopt);
-HrtfStorePtr GetLoadedHrtf(const std::string &name, const uint devrate);
+HrtfStorePtr GetLoadedHrtf(const std::string_view name, const uint devrate);
 
 #endif /* CORE_HRTF_H */

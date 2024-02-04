@@ -236,7 +236,7 @@ void InitNearFieldCtrl(ALCdevice *device, const float ctrl_dist, const uint orde
     if(!device->getConfigValueBool("decoder", "nfc", false) || !(ctrl_dist > 0.0f))
         return;
 
-    device->AvgSpeakerDist = clampf(ctrl_dist, 0.1f, 10.0f);
+    device->AvgSpeakerDist = std::clamp(ctrl_dist, 0.1f, 10.0f);
     TRACE("Using near-field reference distance: %.2f meters\n", device->AvgSpeakerDist);
 
     const float w1{SpeedOfSoundMetersPerSec /
@@ -251,7 +251,8 @@ void InitNearFieldCtrl(ALCdevice *device, const float ctrl_dist, const uint orde
 void InitDistanceComp(ALCdevice *device, const al::span<const Channel> channels,
     const al::span<const float,MaxOutputChannels> dists)
 {
-    const float maxdist{std::accumulate(std::begin(dists), std::end(dists), 0.0f, maxf)};
+    const float maxdist{std::accumulate(std::begin(dists), std::end(dists), 0.0f,
+        [](const float a, const float b) noexcept -> float { return std::max(a, b); })};
 
     if(!device->getConfigValueBool("decoder", "distance-comp", true) || !(maxdist > 0.0f))
         return;
@@ -263,7 +264,7 @@ void InitDistanceComp(ALCdevice *device, const al::span<const Channel> channels,
     for(size_t chidx{0};chidx < channels.size();++chidx)
     {
         const Channel ch{channels[chidx]};
-        const uint idx{device->RealOut.ChannelIndex[ch]};
+        const size_t idx{device->RealOut.ChannelIndex[ch]};
         if(idx == InvalidChannelIndex)
             continue;
 
@@ -278,12 +279,12 @@ void InitDistanceComp(ALCdevice *device, const al::span<const Channel> channels,
         float delay{std::floor((maxdist - distance)*distSampleScale + 0.5f)};
         if(delay > float{DistanceComp::MaxDelay-1})
         {
-            ERR("Delay for channel %u (%s) exceeds buffer length (%f > %d)\n", idx,
+            ERR("Delay for channel %zu (%s) exceeds buffer length (%f > %d)\n", idx,
                 GetLabelFromChannel(ch), delay, DistanceComp::MaxDelay-1);
             delay = float{DistanceComp::MaxDelay-1};
         }
 
-        ChanDelay.resize(maxz(ChanDelay.size(), idx+1));
+        ChanDelay.resize(std::max(ChanDelay.size(), idx+1_uz));
         ChanDelay[idx].Length = static_cast<uint>(delay);
         ChanDelay[idx].Gain = distance / maxdist;
         TRACE("Channel %s distance comp: %u samples, %f gain\n", GetLabelFromChannel(ch),
@@ -631,7 +632,7 @@ void InitPanning(ALCdevice *device, const bool hqdec=false, const bool stablize=
     std::vector<ChannelDec> chancoeffs, chancoeffslf;
     for(size_t i{0u};i < decoder.mChannels.size();++i)
     {
-        const uint idx{device->channelIdxByName(decoder.mChannels[i])};
+        const size_t idx{device->channelIdxByName(decoder.mChannels[i])};
         if(idx == InvalidChannelIndex)
         {
             ERR("Failed to find %s channel in device\n",
@@ -642,7 +643,7 @@ void InitPanning(ALCdevice *device, const bool hqdec=false, const bool stablize=
         auto ordermap = decoder.mIs3D ? AmbiIndex::OrderFromChannel.data()
             : AmbiIndex::OrderFrom2DChannel.data();
 
-        chancoeffs.resize(maxz(chancoeffs.size(), idx+1u), ChannelDec{});
+        chancoeffs.resize(std::max(chancoeffs.size(), idx+1_zu), ChannelDec{});
         al::span<const float,MaxAmbiChannels> src{decoder.mCoeffs[i]};
         al::span<float,MaxAmbiChannels> dst{chancoeffs[idx]};
         for(size_t ambichan{0};ambichan < ambicount;++ambichan)
@@ -651,7 +652,7 @@ void InitPanning(ALCdevice *device, const bool hqdec=false, const bool stablize=
         if(!dual_band)
             continue;
 
-        chancoeffslf.resize(maxz(chancoeffslf.size(), idx+1u), ChannelDec{});
+        chancoeffslf.resize(std::max(chancoeffslf.size(), idx+1_zu), ChannelDec{});
         src = decoder.mCoeffsLF[i];
         dst = chancoeffslf[idx];
         for(size_t ambichan{0};ambichan < ambicount;++ambichan)
@@ -982,13 +983,13 @@ void aluInitRenderer(ALCdevice *device, int hrtf_id, std::optional<StereoEncodin
                 ERR("  %s\n", err->c_str());
                 return false;
             }
-            else if(conf.Speakers.size() > MaxOutputChannels)
+            if(conf.Speakers.size() > MaxOutputChannels)
             {
                 ERR("Unsupported decoder speaker count %zu (max %zu)\n", conf.Speakers.size(),
                     MaxOutputChannels);
                 return false;
             }
-            else if(conf.ChanMask > Ambi3OrderMask)
+            if(conf.ChanMask > Ambi3OrderMask)
             {
                 ERR("Unsupported decoder channel mask 0x%04x (max 0x%x)\n", conf.ChanMask,
                     Ambi3OrderMask);
@@ -997,7 +998,7 @@ void aluInitRenderer(ALCdevice *device, int hrtf_id, std::optional<StereoEncodin
 
             TRACE("Using %s decoder: \"%s\"\n", DevFmtChannelsString(device->FmtChans),
                 conf.Description.c_str());
-            device->mXOverFreq = clampf(conf.XOverFreq, 100.0f, 1000.0f);
+            device->mXOverFreq = std::clamp(conf.XOverFreq, 100.0f, 1000.0f);
 
             decoder_store = std::make_unique<DecoderConfig<DualBand,MaxOutputChannels>>();
             decoder = MakeDecoderView(device, &conf, *decoder_store);
@@ -1062,7 +1063,7 @@ void aluInitRenderer(ALCdevice *device, int hrtf_id, std::optional<StereoEncodin
 
         if(hrtf_id >= 0 && static_cast<uint>(hrtf_id) < device->mHrtfList.size())
         {
-            const std::string &hrtfname = device->mHrtfList[static_cast<uint>(hrtf_id)];
+            const std::string_view hrtfname{device->mHrtfList[static_cast<uint>(hrtf_id)]};
             if(HrtfStorePtr hrtf{GetLoadedHrtf(hrtfname, device->Frequency)})
             {
                 device->mHrtf = std::move(hrtf);
@@ -1072,7 +1073,7 @@ void aluInitRenderer(ALCdevice *device, int hrtf_id, std::optional<StereoEncodin
 
         if(!device->mHrtf)
         {
-            for(const auto &hrtfname : device->mHrtfList)
+            for(const std::string_view hrtfname : device->mHrtfList)
             {
                 if(HrtfStorePtr hrtf{GetLoadedHrtf(hrtfname, device->Frequency)})
                 {
@@ -1092,7 +1093,7 @@ void aluInitRenderer(ALCdevice *device, int hrtf_id, std::optional<StereoEncodin
             if(auto hrtfsizeopt = device->configValue<uint>({}, "hrtf-size"))
             {
                 if(*hrtfsizeopt > 0 && *hrtfsizeopt < device->mIrSize)
-                    device->mIrSize = maxu(*hrtfsizeopt, MinIrLength);
+                    device->mIrSize = std::max(*hrtfsizeopt, MinIrLength);
             }
 
             InitHrtfPanning(device);

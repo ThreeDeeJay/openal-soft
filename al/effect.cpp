@@ -91,9 +91,9 @@ effect_exception::~effect_exception() = default;
 
 namespace {
 
-using SubListAllocator = typename al::allocator<std::array<ALeffect,64>>;
+using SubListAllocator = al::allocator<std::array<ALeffect,64>>;
 
-auto GetDefaultProps(ALenum type) -> const EffectProps&
+auto GetDefaultProps(ALenum type) noexcept -> const EffectProps&
 {
     switch(type)
     {
@@ -140,7 +140,7 @@ bool EnsureEffects(ALCdevice *device, size_t needed)
             sublist.FreeMask = ~0_u64;
             sublist.Effects = SubListAllocator{}.allocate(1);
             device->EffectList.emplace_back(std::move(sublist));
-            count += 64;
+            count += std::tuple_size_v<SubListAllocator::value_type>;
         }
     }
     catch(...) {
@@ -290,14 +290,9 @@ FORCE_ALIGN void AL_APIENTRY alEffectiDirect(ALCcontext *context, ALuint effect,
         bool isOk{value == AL_EFFECT_NULL};
         if(!isOk)
         {
-            for(const EffectList &effectitem : gEffectList)
-            {
-                if(value == effectitem.val && !DisabledEffects.test(effectitem.type))
-                {
-                    isOk = true;
-                    break;
-                }
-            }
+            auto check_effect = [value](const EffectList &item) -> bool
+            { return value == item.val && !DisabledEffects.test(item.type); };
+            isOk = std::any_of(gEffectList.cbegin(), gEffectList.cend(), check_effect);
         }
 
         if(isOk)
@@ -770,7 +765,7 @@ void LoadReverbPreset(const std::string_view name, ALeffect *effect)
         return;
     }
 
-    WARN("Reverb preset '%.*s' not found\n", std::abs(static_cast<int>(name.size())), name.data());
+    WARN("Reverb preset '%.*s' not found\n", al::sizei(name), name.data());
 }
 
 bool IsValidEffectType(ALenum type) noexcept
@@ -778,10 +773,7 @@ bool IsValidEffectType(ALenum type) noexcept
     if(type == AL_EFFECT_NULL)
         return true;
 
-    for(const auto &effect_item : gEffectList)
-    {
-        if(type == effect_item.val && !DisabledEffects.test(effect_item.type))
-            return true;
-    }
-    return false;
+    auto check_effect = [type](const EffectList &item) noexcept -> bool
+    { return type == item.val && !DisabledEffects.test(item.type); };
+    return std::any_of(gEffectList.cbegin(), gEffectList.cend(), check_effect);
 }

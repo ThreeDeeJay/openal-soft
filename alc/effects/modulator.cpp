@@ -70,7 +70,7 @@ struct ModulatorState final : public EffectState {
 
         for(size_t i{0};i < todo;)
         {
-            size_t rem{minz(todo-i, range-index)};
+            size_t rem{std::min(todo-i, size_t{range-index})};
             do {
                 mModSamples[i++] = func(index++, scale);
             } while(--rem);
@@ -140,7 +140,7 @@ void ModulatorState::update(const ContextBase *context, const EffectSlot *slot,
     const float samplesPerCycle{props.Frequency > 0.0f
         ? static_cast<float>(device->Frequency)/props.Frequency + 0.5f
         : 1.0f};
-    const uint range{static_cast<uint>(clampf(samplesPerCycle, 1.0f,
+    const uint range{static_cast<uint>(std::clamp(samplesPerCycle, 1.0f,
         static_cast<float>(device->Frequency)))};
     mIndex = static_cast<uint>(uint64_t{mIndex} * range / mRange);
     mRange = range;
@@ -172,7 +172,7 @@ void ModulatorState::update(const ContextBase *context, const EffectSlot *slot,
     }
 
     float f0norm{props.HighPassCutoff / static_cast<float>(device->Frequency)};
-    f0norm = clampf(f0norm, 1.0f/512.0f, 0.49f);
+    f0norm = std::clamp(f0norm, 1.0f/512.0f, 0.49f);
     /* Bandwidth value is constant in octaves. */
     mChans[0].mFilter.setParamsFromBandwidth(BiquadType::HighPass, f0norm, 1.0f, 0.75f);
     for(size_t i{1u};i < slot->Wet.Buffer.size();++i)
@@ -202,7 +202,7 @@ void ModulatorState::process(const size_t samplesToDo, const al::span<const Floa
                 mBuffer[i] *= mModSamples[i];
 
             MixSamples({mBuffer.data(), samplesToDo}, samplesOut[outidx].data(),
-                chandata->mCurrentGain, chandata->mTargetGain, minz(samplesToDo, 64));
+                chandata->mCurrentGain, chandata->mTargetGain, std::min(samplesToDo, 64_uz));
         }
         ++chandata;
     }

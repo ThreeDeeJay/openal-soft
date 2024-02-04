@@ -41,6 +41,7 @@
 #include <functional>
 
 #include "alc/alconfig.h"
+#include "alstring.h"
 #include "althrd_setname.h"
 #include "core/device.h"
 #include "core/helpers.h"
@@ -88,7 +89,7 @@ SolarisBackend::~SolarisBackend()
 int SolarisBackend::mixerProc()
 {
     SetRTPriority();
-    althrd_setname(MIXER_THREAD_NAME);
+    althrd_setname(GetMixerThreadName());
 
     const size_t frame_step{mDevice->channelsFromFmt()};
     const size_t frame_size{mDevice->frameSizeFromFmt()};
@@ -144,7 +145,7 @@ void SolarisBackend::open(std::string_view name)
         name = GetDefaultName();
     else if(name != GetDefaultName())
         throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%.*s\" not found",
-            static_cast<int>(name.length()), name.data()};
+            al::sizei(name), name.data()};
 
     int fd{::open(solaris_driver.c_str(), O_WRONLY)};
     if(fd == -1)

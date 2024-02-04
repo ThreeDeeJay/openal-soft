@@ -460,9 +460,7 @@ void alc_initconfig()
             else if(al::case_compare(entry, "neon"sv) == 0)
                 capfilter &= ~CPU_CAP_NEON;
             else
-                WARN("Invalid CPU extension \"%.*s\"\n", std::abs(static_cast<int>(entry.size())),
-                    entry.data());
-
+                WARN("Invalid CPU extension \"%.*s\"\n", al::sizei(entry), entry.data());
         }
     }
     if(auto cpuopt = GetCPUInfo())
@@ -557,7 +555,7 @@ void alc_initconfig()
 
     if(auto boostopt = ConfigValueFloat({}, "reverb"sv, "boost"sv))
     {
-        const float valf{std::isfinite(*boostopt) ? clampf(*boostopt, -24.0f, 24.0f) : 0.0f};
+        const float valf{std::isfinite(*boostopt) ? std::clamp(*boostopt, -24.0f, 24.0f) : 0.0f};
         ReverbBoost *= std::pow(10.0f, valf / 20.0f);
     }
 
@@ -1024,16 +1022,16 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
 
         if(auto freqopt = device->configValue<uint>({}, "frequency"))
         {
-            optsrate = clampu(*freqopt, MinOutputRate, MaxOutputRate);
+            optsrate = std::clamp<uint>(*freqopt, MinOutputRate, MaxOutputRate);
 
             const double scale{static_cast<double>(*optsrate) / double{DefaultOutputRate}};
             period_size = static_cast<uint>(std::lround(period_size * scale));
         }
 
         if(auto persizeopt = device->configValue<uint>({}, "period_size"))
-            period_size = clampu(*persizeopt, 64, 8192);
+            period_size = std::clamp(*persizeopt, 64u, 8192u);
         if(auto numperopt = device->configValue<uint>({}, "periods"))
-            buffer_size = clampu(*numperopt, 2, 16) * period_size;
+            buffer_size = std::clamp(*numperopt, 2u, 16u) * period_size;
         else
             buffer_size = period_size * uint{DefaultNumUpdates};
 
@@ -1205,8 +1203,8 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
 
             case ATTRIBUTE(ALC_MAX_AUXILIARY_SENDS)
                 numSends = static_cast<uint>(attrList[attrIdx + 1]);
-                if(numSends > INT_MAX) numSends = 0;
-                else numSends = minu(numSends, MaxSendCount);
+                if(numSends > std::numeric_limits<int>::max()) numSends = 0;
+                else numSends = std::min(numSends, uint{MaxSendCount});
                 break;
 
             case ATTRIBUTE(ALC_HRTF_SOFT)
@@ -1327,7 +1325,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
             if(freqAttr)
             {
                 uint oldrate = optsrate.value_or(DefaultOutputRate);
-                freqAttr = clampi(freqAttr, MinOutputRate, MaxOutputRate);
+                freqAttr = std::clamp<int>(freqAttr, MinOutputRate, MaxOutputRate);
 
                 const double scale{static_cast<double>(freqAttr) / oldrate};
                 period_size = static_cast<uint>(std::lround(period_size * scale));
@@ -1412,7 +1410,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
 
         if(device->FmtChans == DevFmtAmbi3D)
         {
-            device->mAmbiOrder = clampu(aorder, 1, MaxAmbiOrder);
+            device->mAmbiOrder = std::clamp(aorder, 1u, uint{MaxAmbiOrder});
             device->mAmbiLayout = optlayout.value_or(DevAmbiLayout::Default);
             device->mAmbiScale = optscale.value_or(DevAmbiScaling::Default);
             if(device->mAmbiOrder > 3
@@ -1489,21 +1487,21 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
     if(auto srcsopt = device->configValue<uint>({}, "sources"sv))
     {
         if(*srcsopt <= 0) numMono = 256;
-        else numMono = maxu(*srcsopt, 16);
+        else numMono = std::max(*srcsopt, 16u);
     }
     else
     {
-        numMono = minu(numMono, INT_MAX-numStereo);
-        numMono = maxu(numMono+numStereo, 256);
+        numMono = std::min(numMono, std::numeric_limits<int>::max()-numStereo);
+        numMono = std::max(numMono+numStereo, 256u);
     }
-    numStereo = minu(numStereo, numMono);
+    numStereo = std::min(numStereo, numMono);
     numMono -= numStereo;
     device->SourcesMax = numMono + numStereo;
     device->NumMonoSources = numMono;
     device->NumStereoSources = numStereo;
 
-    if(auto sendsopt = device->configValue<int>({}, "sends"sv))
-        numSends = minu(numSends, static_cast<uint>(clampi(*sendsopt, 0, MaxSendCount)));
+    if(auto sendsopt = device->configValue<uint>({}, "sends"sv))
+        numSends = std::min(numSends, std::clamp(*sendsopt, 0u, uint{MaxSendCount}));
     device->NumAuxSends = numSends;
 
     TRACE("Max sources: %d (%d + %d), effect slots: %d, sends: %d\n",
@@ -1554,7 +1552,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
 
         if(depth > 0)
         {
-            depth = clampi(depth, 2, 24);
+            depth = std::clamp(depth, 2, 24);
             device->DitherDepth = std::pow(2.0f, static_cast<float>(depth-1));
         }
     }
@@ -1587,7 +1585,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
             break;
         }
     }
-    if(optlimit.value_or(false) == false)
+    if(!optlimit.value_or(false))
         TRACE("Output limiter disabled\n");
     else
     {
@@ -1872,7 +1870,7 @@ FORCE_ALIGN void ALC_APIENTRY alsoft_set_log_callback(LPALSOFTLOGCALLBACK callba
 }
 
 /** Returns a new reference to the currently active context for this thread. */
-ContextRef GetContextRef()
+ContextRef GetContextRef() noexcept
 {
     ALCcontext *context{ALCcontext::getThreadContext()};
     if(context)
@@ -2373,8 +2371,8 @@ static size_t GetIntegerv(ALCdevice *device, ALCenum param, const al::span<int> 
 
     case ALC_NUM_HRTF_SPECIFIERS_SOFT:
         device->enumerateHrtfs();
-        values[0] = static_cast<int>(minz(device->mHrtfList.size(),
-            std::numeric_limits<int>::max()));
+        values[0] = static_cast<int>(std::min(device->mHrtfList.size(),
+            size_t{std::numeric_limits<int>::max()}));
         return 1;
 
     case ALC_OUTPUT_LIMITER_SOFT:
@@ -2689,7 +2687,7 @@ ALC_API ALCcontext* ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCin
             ERR("volume-adjust must be finite: %f\n", valf);
         else
         {
-            const float db{clampf(valf, -24.0f, 24.0f)};
+            const float db{std::clamp(valf, -24.0f, 24.0f)};
             if(db != valf)
                 WARN("volume-adjust clamped: %f, range: +/-%f\n", valf, 24.0f);
             context->mGainBoost = std::pow(10.0f, db/20.0f);
@@ -2855,29 +2853,10 @@ ALC_API ALCdevice* ALC_APIENTRY alcOpenDevice(const ALCchar *deviceName) noexcep
         return nullptr;
     }
 
-    /* We need to ensure the device name isn't too long. The string_view is
-     * printed using the "%.*s" formatter, which uses an int for the precision/
-     * length. It wouldn't be a significant problem if larger values simply
-     * printed fewer characters due to truncation, but negative values are
-     * ignored, treating it like a normal null-terminated string, and
-     * string_views don't need to be null-terminated.
-     *
-     * Other than the annoyance of checking, this shouldn't be a problem. Two
-     * billion bytes is enough for a device name.
-     */
     std::string_view devname{deviceName ? deviceName : ""};
     if(!devname.empty())
     {
-        if(devname.length() >= std::numeric_limits<int>::max())
-        {
-            ERR("Device name too long (%zu >= %d)\n", devname.length(),
-                std::numeric_limits<int>::max());
-            alcSetError(nullptr, ALC_INVALID_VALUE);
-            return nullptr;
-        }
-
-        TRACE("Opening playback device \"%.*s\"\n", static_cast<int>(devname.size()),
-            devname.data());
+        TRACE("Opening playback device \"%.*s\"\n", al::sizei(devname), devname.data());
         if(al::case_compare(devname, GetDefaultName()) == 0
 #ifdef _WIN32
             /* Some old Windows apps hardcode these expecting OpenAL to use a
@@ -3023,16 +3002,7 @@ ALC_API ALCdevice* ALC_APIENTRY alcCaptureOpenDevice(const ALCchar *deviceName, 
     std::string_view devname{deviceName ? deviceName : ""};
     if(!devname.empty())
     {
-        if(devname.length() >= std::numeric_limits<int>::max())
-        {
-            ERR("Device name too long (%zu >= %d)\n", devname.length(),
-                std::numeric_limits<int>::max());
-            alcSetError(nullptr, ALC_INVALID_VALUE);
-            return nullptr;
-        }
-
-        TRACE("Opening capture device \"%.*s\"\n", static_cast<int>(devname.size()),
-            devname.data());
+        TRACE("Opening capture device \"%.*s\"\n", al::sizei(devname), devname.data());
         if(al::case_compare(devname, GetDefaultName()) == 0
             || al::case_compare(devname, "openal-soft"sv) == 0)
             devname = {};

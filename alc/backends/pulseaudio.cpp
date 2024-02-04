@@ -44,6 +44,7 @@
 #include "almalloc.h"
 #include "alnumeric.h"
 #include "alspan.h"
+#include "alstring.h"
 #include "core/devformat.h"
 #include "core/device.h"
 #include "core/logging.h"
@@ -335,14 +336,14 @@ public:
     static auto Create() { return PulseMainloop{pa_threaded_mainloop_new()}; }
 
 
-    void streamSuccessCallback(pa_stream*, int) noexcept { signal(); }
+    void streamSuccessCallback(pa_stream*, int) const noexcept { signal(); }
     static void streamSuccessCallbackC(pa_stream *stream, int success, void *pdata) noexcept
     { static_cast<PulseMainloop*>(pdata)->streamSuccessCallback(stream, success); }
 
     void close(pa_stream *stream=nullptr);
 
 
-    void deviceSinkCallback(pa_context*, const pa_sink_info *info, int eol) noexcept
+    void deviceSinkCallback(pa_context*, const pa_sink_info *info, int eol) const noexcept
     {
         if(eol)
         {
@@ -373,7 +374,7 @@ public:
         TRACE("Got device \"%s\", \"%s\"\n", newentry.name.c_str(), newentry.device_name.c_str());
     }
 
-    void deviceSourceCallback(pa_context*, const pa_source_info *info, int eol) noexcept
+    void deviceSourceCallback(pa_context*, const pa_source_info *info, int eol) const noexcept
     {
         if(eol)
         {
@@ -420,7 +421,7 @@ struct MainloopUniqueLock : public std::unique_lock<PulseMainloop> {
     auto wait(Predicate done_waiting) const -> void
     { while(!done_waiting()) wait(); }
 
-    void waitForOperation(pa_operation *op)
+    void waitForOperation(pa_operation *op) const
     {
         if(op)
         {
@@ -703,7 +704,7 @@ void PulsePlayback::streamWriteCallback(pa_stream *stream, size_t nbytes) noexce
             free_func = pa_xfree;
         }
         else
-            buflen = minz(buflen, nbytes);
+            buflen = std::min(buflen, nbytes);
         nbytes -= buflen;
 
         mDevice->renderSamples(buf, static_cast<uint>(buflen/mFrameSize), mSpec.channels);
@@ -797,7 +798,7 @@ void PulsePlayback::open(std::string_view name)
             [name](const DevMap &entry) -> bool { return entry.name == name; });
         if(iter == PlaybackDevices.cend())
             throw al::backend_exception{al::backend_error::NoDevice,
-                "Device name \"%.*s\" not found", static_cast<int>(name.length()), name.data()};
+                "Device name \"%.*s\" not found", al::sizei(name), name.data()};
         pulse_name = iter->device_name.c_str();
         dev_name = iter->name.c_str();
     }
@@ -965,16 +966,15 @@ bool PulsePlayback::reset()
          * accordingly.
          */
         const auto scale = static_cast<double>(mSpec.rate) / mDevice->Frequency;
-        const auto perlen = static_cast<uint>(clampd(scale*mDevice->UpdateSize + 0.5, 64.0,
-            8192.0));
-        const auto bufmax = uint{std::numeric_limits<int>::max() / mFrameSize};
-        const auto buflen = static_cast<uint>(clampd(scale*mDevice->BufferSize + 0.5, perlen*2.0,
-            bufmax));
+        const auto perlen = std::clamp(std::round(scale*mDevice->UpdateSize), 64.0, 8192.0);
+        const auto bufmax = uint{std::numeric_limits<int>::max()} / mFrameSize;
+        const auto buflen = std::clamp(std::round(scale*mDevice->BufferSize), perlen*2.0,
+            static_cast<double>(bufmax));
 
         mAttr.maxlength = ~0u;
-        mAttr.tlength = buflen * mFrameSize;
+        mAttr.tlength = static_cast<uint>(buflen) * mFrameSize;
         mAttr.prebuf = 0u;
-        mAttr.minreq = perlen * mFrameSize;
+        mAttr.minreq = static_cast<uint>(perlen) * mFrameSize;
 
         op = pa_stream_set_buffer_attr(mStream, &mAttr, &PulseMainloop::streamSuccessCallbackC,
             &mMainloop);
@@ -1141,7 +1141,7 @@ void PulseCapture::open(std::string_view name)
             [name](const DevMap &entry) -> bool { return entry.name == name; });
         if(iter == CaptureDevices.cend())
             throw al::backend_exception{al::backend_error::NoDevice,
-                "Device name \"%.*s\" not found", static_cast<int>(name.length()), name.data()};
+                "Device name \"%.*s\" not found", al::sizei(name), name.data()};
         pulse_name = iter->device_name.c_str();
         mDevice->DeviceName = iter->name;
     }
@@ -1207,12 +1207,12 @@ void PulseCapture::open(std::string_view name)
         throw al::backend_exception{al::backend_error::DeviceError, "Invalid sample format"};
 
     const auto frame_size = static_cast<uint>(pa_frame_size(&mSpec));
-    const uint samples{maxu(mDevice->BufferSize, 100 * mDevice->Frequency / 1000)};
+    const uint samples{std::max(mDevice->BufferSize, mDevice->Frequency*100u/1000u)};
     mAttr.minreq = ~0u;
     mAttr.prebuf = ~0u;
     mAttr.maxlength = samples * frame_size;
     mAttr.tlength = ~0u;
-    mAttr.fragsize = minu(samples, 50*mDevice->Frequency/1000) * frame_size;
+    mAttr.fragsize = std::min(samples, mDevice->Frequency*50u/1000u) * frame_size;
 
     pa_stream_flags_t flags{PA_STREAM_START_CORKED | PA_STREAM_ADJUST_LATENCY};
     if(!GetConfigValueBool({}, "pulse", "allow-moves", true))
@@ -1267,7 +1267,7 @@ void PulseCapture::captureSamples(std::byte *buffer, uint samples)
     {
         if(mHoleLength > 0) UNLIKELY
         {
-            const size_t rem{minz(dstbuf.size(), mHoleLength)};
+            const size_t rem{std::min(dstbuf.size(), mHoleLength)};
             std::fill_n(dstbuf.begin(), rem, mSilentVal);
             dstbuf = dstbuf.subspan(rem);
             mHoleLength -= rem;
@@ -1276,7 +1276,7 @@ void PulseCapture::captureSamples(std::byte *buffer, uint samples)
         }
         if(!mCapBuffer.empty())
         {
-            const size_t rem{minz(dstbuf.size(), mCapBuffer.size())};
+            const size_t rem{std::min(dstbuf.size(), mCapBuffer.size())};
             std::copy_n(mCapBuffer.begin(), rem, dstbuf.begin());
             dstbuf = dstbuf.subspan(rem);
             mCapBuffer = mCapBuffer.subspan(rem);
@@ -1324,7 +1324,7 @@ void PulseCapture::captureSamples(std::byte *buffer, uint samples)
 
 uint PulseCapture::availableSamples()
 {
-    size_t readable{maxz(mCapBuffer.size(), mHoleLength)};
+    size_t readable{std::max(mCapBuffer.size(), mHoleLength)};
 
     if(mDevice->Connected.load(std::memory_order_acquire))
     {

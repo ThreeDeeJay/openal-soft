@@ -42,6 +42,7 @@
 #include "alc/alconfig.h"
 #include "almalloc.h"
 #include "alnumeric.h"
+#include "alstring.h"
 #include "althrd_setname.h"
 #include "core/device.h"
 #include "core/helpers.h"
@@ -255,7 +256,7 @@ std::vector<DevMap> PlaybackDevices;
 std::vector<DevMap> CaptureDevices;
 
 
-const std::string_view prefix_name(snd_pcm_stream_t stream)
+std::string_view prefix_name(snd_pcm_stream_t stream) noexcept
 {
     if(stream == SND_PCM_STREAM_PLAYBACK)
         return "device-prefix"sv;
@@ -493,7 +494,7 @@ AlsaPlayback::~AlsaPlayback()
 int AlsaPlayback::mixerProc()
 {
     SetRTPriority();
-    althrd_setname(MIXER_THREAD_NAME);
+    althrd_setname(GetMixerThreadName());
 
     const snd_pcm_uframes_t update_size{mDevice->UpdateSize};
     const snd_pcm_uframes_t buffer_size{mDevice->BufferSize};
@@ -576,7 +577,7 @@ int AlsaPlayback::mixerProc()
 int AlsaPlayback::mixerNoMMapProc()
 {
     SetRTPriority();
-    althrd_setname(MIXER_THREAD_NAME);
+    althrd_setname(GetMixerThreadName());
 
     const snd_pcm_uframes_t update_size{mDevice->UpdateSize};
     const snd_pcm_uframes_t buffer_size{mDevice->BufferSize};
@@ -673,7 +674,7 @@ void AlsaPlayback::open(std::string_view name)
             [name](const DevMap &entry) -> bool { return entry.name == name; });
         if(iter == PlaybackDevices.cend())
             throw al::backend_exception{al::backend_error::NoDevice,
-                "Device name \"%.*s\" not found", static_cast<int>(name.length()), name.data()};
+                "Device name \"%.*s\" not found", al::sizei(name), name.data()};
         driver = iter->device_name;
     }
     else
@@ -942,7 +943,7 @@ void AlsaCapture::open(std::string_view name)
             [name](const DevMap &entry) -> bool { return entry.name == name; });
         if(iter == CaptureDevices.cend())
             throw al::backend_exception{al::backend_error::NoDevice,
-                "Device name \"%.*s\" not found", static_cast<int>(name.length()), name.data()};
+                "Device name \"%.*s\" not found", al::sizei(name), name.data()};
         driver = iter->device_name;
     }
     else
@@ -986,8 +987,10 @@ void AlsaCapture::open(std::string_view name)
         break;
     }
 
-    snd_pcm_uframes_t bufferSizeInFrames{maxu(mDevice->BufferSize, 100*mDevice->Frequency/1000)};
-    snd_pcm_uframes_t periodSizeInFrames{minu(mDevice->BufferSize, 25*mDevice->Frequency/1000)};
+    snd_pcm_uframes_t bufferSizeInFrames{std::max(mDevice->BufferSize,
+        100u*mDevice->Frequency/1000u)};
+    snd_pcm_uframes_t periodSizeInFrames{std::min(mDevice->BufferSize,
+        25u*mDevice->Frequency/1000u)};
 
     bool needring{false};
     HwParamsPtr hp{CreateHwParams()};

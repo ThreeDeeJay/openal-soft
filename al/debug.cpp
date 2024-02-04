@@ -17,6 +17,7 @@
 #include "alc/context.h"
 #include "alc/inprogext.h"
 #include "alspan.h"
+#include "alstring.h"
 #include "auxeffectslot.h"
 #include "buffer.h"
 #include "core/logging.h"
@@ -185,7 +186,7 @@ void ALCcontext::sendDebugMessage(std::unique_lock<std::mutex> &debuglock, Debug
     if(message.length() >= MaxDebugMessageLength) UNLIKELY
     {
         ERR("Debug message too long (%zu >= %d):\n-> %.*s\n", message.length(),
-            MaxDebugMessageLength, static_cast<int>(message.length()), message.data());
+            MaxDebugMessageLength, al::sizei(message), message.data());
         return;
     }
 
@@ -226,8 +227,7 @@ void ALCcontext::sendDebugMessage(std::unique_lock<std::mutex> &debuglock, Debug
                 "  Severity: %s\n"
                 "  Message: \"%.*s\"\n",
                 GetDebugSourceName(source), GetDebugTypeName(type), id,
-                GetDebugSeverityName(severity), static_cast<int>(message.length()),
-                message.data());
+                GetDebugSeverityName(severity), al::sizei(message), message.data());
     }
 }
 
@@ -529,7 +529,7 @@ FORCE_ALIGN void AL_APIENTRY alGetObjectLabelDirectEXT(ALCcontext *context, ALen
             *length = static_cast<ALsizei>(objname.length());
         else
         {
-            const size_t tocopy{minz(objname.length(), static_cast<uint>(bufSize)-1)};
+            const size_t tocopy{std::min(objname.size(), static_cast<uint>(bufSize)-1_uz)};
             std::memcpy(label, objname.data(), tocopy);
             label[tocopy] = '\0';
             if(length)

@@ -146,8 +146,8 @@ void ChorusState::update(const ContextBase *context, const EffectSlot *slot,
 
     mWaveform = waveform;
 
-    mDelay = maxi(float2int(delay*frequency*MixerFracOne + 0.5f), mindelay);
-    mDepth = minf(depth * static_cast<float>(mDelay),
+    mDelay = std::max(float2int(std::round(delay*frequency*MixerFracOne)), mindelay);
+    mDepth = std::min(depth * static_cast<float>(mDelay),
         static_cast<float>(mDelay - mindelay));
 
     mFeedback = feedback;
@@ -173,7 +173,8 @@ void ChorusState::update(const ContextBase *context, const EffectSlot *slot,
         /* Calculate LFO coefficient (number of samples per cycle). Limit the
          * max range to avoid overflow when calculating the displacement.
          */
-        const uint lfo_range{float2uint(minf(frequency/rate + 0.5f, float{INT_MAX/360 - 180}))};
+        static constexpr int range_limit{std::numeric_limits<int>::max()/360 - 180};
+        const uint lfo_range{float2uint(std::min(std::round(frequency/rate), float{range_limit}))};
 
         mLfoOffset = mLfoOffset * lfo_range / mLfoRange;
         mLfoRange = lfo_range;
@@ -213,7 +214,7 @@ void ChorusState::calcTriangleDelays(const size_t todo)
     uint offset{mLfoOffset};
     for(size_t i{0};i < todo;)
     {
-        size_t rem{minz(todo-i, lfo_range-offset)};
+        size_t rem{std::min(todo-i, size_t{lfo_range-offset})};
         do {
             mModDelays[0][i++] = gen_lfo(offset++);
         } while(--rem);
@@ -224,7 +225,7 @@ void ChorusState::calcTriangleDelays(const size_t todo)
     offset = (mLfoOffset+mLfoDisp) % lfo_range;
     for(size_t i{0};i < todo;)
     {
-        size_t rem{minz(todo-i, lfo_range-offset)};
+        size_t rem{std::min(todo-i, size_t{lfo_range-offset})};
         do {
             mModDelays[1][i++] = gen_lfo(offset++);
         } while(--rem);
@@ -254,7 +255,7 @@ void ChorusState::calcSinusoidDelays(const size_t todo)
     uint offset{mLfoOffset};
     for(size_t i{0};i < todo;)
     {
-        size_t rem{minz(todo-i, lfo_range-offset)};
+        size_t rem{std::min(todo-i, size_t{lfo_range-offset})};
         do {
             mModDelays[0][i++] = gen_lfo(offset++);
         } while(--rem);
@@ -265,7 +266,7 @@ void ChorusState::calcSinusoidDelays(const size_t todo)
     offset = (mLfoOffset+mLfoDisp) % lfo_range;
     for(size_t i{0};i < todo;)
     {
-        size_t rem{minz(todo-i, lfo_range-offset)};
+        size_t rem{std::min(todo-i, size_t{lfo_range-offset})};
         do {
             mModDelays[1][i++] = gen_lfo(offset++);
         } while(--rem);

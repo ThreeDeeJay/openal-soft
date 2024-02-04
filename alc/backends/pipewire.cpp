@@ -184,10 +184,8 @@ bool check_version(const char *version)
      */
     int major{0}, minor{0}, revision{0};
     int ret{sscanf(version, "%d.%d.%d", &major, &minor, &revision)};
-    if(ret == 3 && (major > PW_MAJOR || (major == PW_MAJOR && minor > PW_MINOR)
-        || (major == PW_MAJOR && minor == PW_MINOR && revision >= PW_MICRO)))
-        return true;
-    return false;
+    return ret == 3 && (major > PW_MAJOR || (major == PW_MAJOR && minor > PW_MINOR)
+        || (major == PW_MAJOR && minor == PW_MINOR && revision >= PW_MICRO));
 }
 
 #ifdef HAVE_DYNLOAD
@@ -449,7 +447,7 @@ public:
 
     auto signal(bool wait) const { return pw_thread_loop_signal(mLoop, wait); }
 
-    auto newContext(pw_properties *props=nullptr, size_t user_data_size=0)
+    auto newContext(pw_properties *props=nullptr, size_t user_data_size=0) const
     { return PwContextPtr{pw_context_new(getLoop(), props, user_data_size)}; }
 
     static auto Create(const char *name, spa_dict *props=nullptr)
@@ -485,8 +483,7 @@ struct NodeProxy {
     {
         pw_node_events ret{};
         ret.version = PW_VERSION_NODE_EVENTS;
-        ret.info = [](void *object, const pw_node_info *info) noexcept
-        { static_cast<NodeProxy*>(object)->infoCallback(info); };
+        ret.info = infoCallback;
         ret.param = [](void *object, int seq, uint32_t id, uint32_t index, uint32_t next, const spa_pod *param) noexcept
         { static_cast<NodeProxy*>(object)->paramCallback(seq, id, index, next, param); };
         return ret;
@@ -513,9 +510,8 @@ struct NodeProxy {
     { spa_hook_remove(&mListener); }
 
 
-    void infoCallback(const pw_node_info *info) noexcept;
-
-    void paramCallback(int seq, uint32_t id, uint32_t index, uint32_t next, const spa_pod *param) noexcept;
+    static void infoCallback(void *object, const pw_node_info *info) noexcept;
+    void paramCallback(int seq, uint32_t id, uint32_t index, uint32_t next, const spa_pod *param) const noexcept;
 };
 
 /* A metadata proxy object used to query the default sink and source. */
@@ -524,8 +520,7 @@ struct MetadataProxy {
     {
         pw_metadata_events ret{};
         ret.version = PW_VERSION_METADATA_EVENTS;
-        ret.property = [](void *object, uint32_t id, const char *key, const char *type, const char *value) noexcept
-        { return static_cast<MetadataProxy*>(object)->propertyCallback(id, key, type, value); };
+        ret.property = propertyCallback;
         return ret;
     }
 
@@ -543,7 +538,8 @@ struct MetadataProxy {
     ~MetadataProxy()
     { spa_hook_remove(&mListener); }
 
-    int propertyCallback(uint32_t id, const char *key, const char *type, const char *value) noexcept;
+    static auto propertyCallback(void *object, uint32_t id, const char *key, const char *type,
+        const char *value) noexcept -> int;
 };
 
 
@@ -583,7 +579,8 @@ struct EventManager {
     auto lock() const { return mLoop.lock(); }
     auto unlock() const { return mLoop.unlock(); }
 
-    inline bool initIsDone(std::memory_order m=std::memory_order_seq_cst) noexcept
+    [[nodiscard]] inline
+    bool initIsDone(std::memory_order m=std::memory_order_seq_cst) const noexcept
     { return mInitDone.load(m); }
 
     /**
@@ -689,7 +686,7 @@ struct DeviceNode {
     void parsePositions(const spa_pod *value, bool force_update) noexcept;
     void parseChannelCount(const spa_pod *value, bool force_update) noexcept;
 
-    void callEvent(alc::EventType type, std::string_view message)
+    void callEvent(alc::EventType type, std::string_view message) const
     {
         /* Source nodes aren't recognized for playback, only Sink and Duplex
          * nodes are. All node types are recognized for capture.
@@ -810,12 +807,10 @@ bool MatchChannelMap(const al::span<const uint32_t> map0,
 {
     if(map0.size() < map1.size())
         return false;
-    for(const spa_audio_channel chid : map1)
-    {
-        if(std::find(map0.begin(), map0.end(), chid) == map0.end())
-            return false;
-    }
-    return true;
+
+    auto find_channel = [map0](const spa_audio_channel chid) -> bool
+    { return std::find(map0.begin(), map0.end(), chid) != map0.end(); };
+    return std::all_of(map1.cbegin(), map1.cend(), find_channel);
 }
 
 void DeviceNode::parseSampleRate(const spa_pod *value, bool force_update) noexcept
@@ -843,7 +838,8 @@ void DeviceNode::parseSampleRate(const spa_pod *value, bool force_update) noexce
         /* [0] is the default, [1] is the min, and [2] is the max. */
         TRACE("  sample rate: %d (range: %d -> %d)\n", srates[0], srates[1], srates[2]);
         if(!mSampleRate || force_update)
-            mSampleRate = static_cast<uint>(clampi(srates[0], MinOutputRate, MaxOutputRate));
+            mSampleRate = static_cast<uint>(std::clamp<int>(srates[0], MinOutputRate,
+                MaxOutputRate));
         return;
     }
 
@@ -890,7 +886,8 @@ void DeviceNode::parseSampleRate(const spa_pod *value, bool force_update) noexce
 
         TRACE("  sample rate: %d\n", srates[0]);
         if(!mSampleRate || force_update)
-            mSampleRate = static_cast<uint>(clampi(srates[0], MinOutputRate, MaxOutputRate));
+            mSampleRate = static_cast<uint>(std::clamp<int>(srates[0], MinOutputRate,
+                MaxOutputRate));
         return;
     }
 
@@ -976,7 +973,7 @@ void DeviceNode::parseChannelCount(const spa_pod *value, bool force_update) noex
 { return "Audio/Source/Virtual"sv; }
 
 
-void NodeProxy::infoCallback(const pw_node_info *info) noexcept
+void NodeProxy::infoCallback(void*, const pw_node_info *info) noexcept
 {
     /* We only care about property changes here (media class, name/desc).
      * Format changes will automatically invoke the param callback.
@@ -1076,7 +1073,7 @@ void NodeProxy::infoCallback(const pw_node_info *info) noexcept
     }
 }
 
-void NodeProxy::paramCallback(int, uint32_t id, uint32_t, uint32_t, const spa_pod *param) noexcept
+void NodeProxy::paramCallback(int, uint32_t id, uint32_t, uint32_t, const spa_pod *param) const noexcept
 {
     if(id == SPA_PARAM_EnumFormat || id == SPA_PARAM_Format)
     {
@@ -1101,8 +1098,8 @@ void NodeProxy::paramCallback(int, uint32_t id, uint32_t, uint32_t, const spa_po
 }
 
 
-int MetadataProxy::propertyCallback(uint32_t id, const char *key, const char *type,
-    const char *value) noexcept
+auto MetadataProxy::propertyCallback(void*, uint32_t id, const char *key, const char *type,
+    const char *value) noexcept -> int
 {
     if(id != PW_ID_CORE)
         return 0;
@@ -1477,7 +1474,7 @@ void PipeWirePlayback::outputCallback() noexcept
     if(!pw_buf) UNLIKELY return;
 
     const al::span<spa_data> datas{pw_buf->buffer->datas,
-        minz(mChannelPtrs.size(), pw_buf->buffer->n_datas)};
+        std::min(mChannelPtrs.size(), size_t{pw_buf->buffer->n_datas})};
 #if PW_CHECK_VERSION(0,3,49)
     /* In 0.3.49, pw_buffer::requested specifies the number of samples needed
      * by the resampler/graph for this audio update.
@@ -1500,7 +1497,7 @@ void PipeWirePlayback::outputCallback() noexcept
     auto chanptr_end = mChannelPtrs.begin();
     for(const auto &data : datas)
     {
-        length = minu(length, data.maxsize/sizeof(float));
+        length = std::min(length, data.maxsize/uint{sizeof(float)});
         *chanptr_end = static_cast<float*>(data.data);
         ++chanptr_end;
 
@@ -1558,7 +1555,7 @@ void PipeWirePlayback::open(std::string_view name)
         auto match = std::find_if(devlist.cbegin(), devlist.cend(), match_name);
         if(match == devlist.cend())
             throw al::backend_exception{al::backend_error::NoDevice,
-                "Device name \"%.*s\" not found", static_cast<int>(name.length()), name.data()};
+                "Device name \"%.*s\" not found", al::sizei(name), name.data()};
 
         targetid = match->mSerial;
         devname = match->mName;
@@ -1637,8 +1634,8 @@ bool PipeWirePlayback::reset()
                 const double buffersize{std::round(mDevice->BufferSize * scale)};
 
                 mDevice->Frequency = match->mSampleRate;
-                mDevice->UpdateSize = static_cast<uint>(clampd(updatesize, 64.0, 8192.0));
-                mDevice->BufferSize = static_cast<uint>(maxd(buffersize, 128.0));
+                mDevice->UpdateSize = static_cast<uint>(std::clamp(updatesize, 64.0, 8192.0));
+                mDevice->BufferSize = static_cast<uint>(std::max(buffersize, 128.0));
             }
             if(!mDevice->Flags.test(ChannelsRequest) && match->mChannels != InvalidChannelConfig)
                 mDevice->FmtChans = match->mChannels;
@@ -1950,8 +1947,8 @@ void PipeWireCapture::inputCallback() noexcept
     if(!pw_buf) UNLIKELY return;
 
     spa_data *bufdata{pw_buf->buffer->datas};
-    const uint offset{minu(bufdata->chunk->offset, bufdata->maxsize)};
-    const uint size{minu(bufdata->chunk->size, bufdata->maxsize - offset)};
+    const uint offset{std::min(bufdata->chunk->offset, bufdata->maxsize)};
+    const uint size{std::min(bufdata->chunk->size, bufdata->maxsize - offset)};
 
     std::ignore = mRing->write(static_cast<char*>(bufdata->data) + offset,
         size / mRing->getElemSize());
@@ -2015,7 +2012,7 @@ void PipeWireCapture::open(std::string_view name)
         }
         if(match == devlist.cend())
             throw al::backend_exception{al::backend_error::NoDevice,
-                "Device name \"%.*s\" not found", static_cast<int>(name.length()), name.data()};
+                "Device name \"%.*s\" not found", al::sizei(name), name.data()};
 
         targetid = match->mSerial;
         devname = name;
@@ -2139,7 +2136,7 @@ void PipeWireCapture::open(std::string_view name)
     setDefaultWFXChannelOrder();
 
     /* Ensure at least a 100ms capture buffer. */
-    mRing = RingBuffer::Create(maxu(mDevice->Frequency/10, mDevice->BufferSize),
+    mRing = RingBuffer::Create(std::max(mDevice->Frequency/10u, mDevice->BufferSize),
         mDevice->frameSizeFromFmt(), false);
 }
 

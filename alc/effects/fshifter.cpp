@@ -133,7 +133,7 @@ void FshifterState::update(const ContextBase *context, const EffectSlot *slot,
     const DeviceBase *device{context->mDevice};
 
     const float step{props.Frequency / static_cast<float>(device->Frequency)};
-    mPhaseStep[0] = mPhaseStep[1] = fastf2u(minf(step, 1.0f) * MixerFracOne);
+    mPhaseStep[0] = mPhaseStep[1] = fastf2u(std::min(step, 1.0f) * MixerFracOne);
 
     switch(props.LeftDirection)
     {
@@ -180,7 +180,7 @@ void FshifterState::process(const size_t samplesToDo, const al::span<const Float
 {
     for(size_t base{0u};base < samplesToDo;)
     {
-        size_t todo{minz(HilStep-mCount, samplesToDo-base)};
+        size_t todo{std::min(HilStep-mCount, samplesToDo-base)};
 
         /* Fill FIFO buffer with samples data */
         const size_t pos{mPos};
@@ -236,7 +236,7 @@ void FshifterState::process(const size_t samplesToDo, const al::span<const Float
 
         /* Now, mix the processed sound data to the output. */
         MixSamples({BufferOut, samplesToDo}, samplesOut, mGains[c].Current.data(),
-            mGains[c].Target.data(), maxz(samplesToDo, 512), 0);
+            mGains[c].Target.data(), std::max(samplesToDo, 512_uz), 0);
     }
 }
 

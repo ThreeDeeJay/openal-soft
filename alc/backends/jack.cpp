@@ -36,6 +36,7 @@
 #include "alc/alconfig.h"
 #include "alnumeric.h"
 #include "alsem.h"
+#include "alstring.h"
 #include "althrd_setname.h"
 #include "core/device.h"
 #include "core/helpers.h"
@@ -363,7 +364,7 @@ int JackPlayback::process(jack_nframes_t numframes) noexcept
     if(mPlaying.load(std::memory_order_acquire)) LIKELY
     {
         auto data = mRing->getReadVector();
-        jack_nframes_t todo{minu(numframes, static_cast<uint>(data.first.len))};
+        jack_nframes_t todo{std::min(numframes, static_cast<jack_nframes_t>(data.first.len))};
         auto write_first = [&data,numchans,todo](float *outbuf) -> float*
         {
             const auto *RESTRICT in = reinterpret_cast<const float*>(data.first.buf);
@@ -380,7 +381,7 @@ int JackPlayback::process(jack_nframes_t numframes) noexcept
         std::transform(out.begin(), out.begin()+numchans, out.begin(), write_first);
         total += todo;
 
-        todo = minu(numframes-total, static_cast<uint>(data.second.len));
+        todo = std::min(numframes-total, static_cast<jack_nframes_t>(data.second.len));
         if(todo > 0)
         {
             auto write_second = [&data,numchans,todo](float *outbuf) -> float*
@@ -417,7 +418,7 @@ int JackPlayback::process(jack_nframes_t numframes) noexcept
 int JackPlayback::mixerProc()
 {
     SetRTPriority();
-    althrd_setname(MIXER_THREAD_NAME);
+    althrd_setname(GetMixerThreadName());
 
     const size_t frame_step{mDevice->channelsFromFmt()};
 
@@ -434,8 +435,8 @@ int JackPlayback::mixerProc()
         size_t todo{data.first.len + data.second.len};
         todo -= todo%mDevice->UpdateSize;
 
-        const auto len1 = static_cast<uint>(minz(data.first.len, todo));
-        const auto len2 = static_cast<uint>(minz(data.second.len, todo-len1));
+        const auto len1 = static_cast<uint>(std::min(data.first.len, todo));
+        const auto len2 = static_cast<uint>(std::min(data.second.len, todo-len1));
 
         std::lock_guard<std::mutex> dlock{mMutex};
         mDevice->renderSamples(data.first.buf, len1, frame_step);
@@ -484,7 +485,7 @@ void JackPlayback::open(std::string_view name)
         auto iter = std::find_if(PlaybackList.cbegin(), PlaybackList.cend(), check_name);
         if(iter == PlaybackList.cend())
             throw al::backend_exception{al::backend_error::NoDevice,
-                "Device name \"%.*s\" not found", static_cast<int>(name.length()), name.data()};
+                "Device name \"%.*s\" not found", al::sizei(name), name.data()};
         mPortPattern = iter->mPattern;
     }
 
@@ -518,7 +519,7 @@ bool JackPlayback::reset()
     {
         const std::string_view devname{mDevice->DeviceName};
         uint bufsize{ConfigValueUInt(devname, "jack", "buffer-size").value_or(mDevice->UpdateSize)};
-        bufsize = maxu(NextPowerOf2(bufsize), mDevice->UpdateSize);
+        bufsize = std::max(NextPowerOf2(bufsize), mDevice->UpdateSize);
         mDevice->BufferSize = bufsize + mDevice->UpdateSize;
     }
 
@@ -604,7 +605,7 @@ void JackPlayback::start()
     else
     {
         uint bufsize{ConfigValueUInt(devname, "jack", "buffer-size").value_or(mDevice->UpdateSize)};
-        bufsize = maxu(NextPowerOf2(bufsize), mDevice->UpdateSize);
+        bufsize = std::max(NextPowerOf2(bufsize), mDevice->UpdateSize);
         mDevice->BufferSize = bufsize + mDevice->UpdateSize;
 
         mRing = RingBuffer::Create(bufsize, mDevice->frameSizeFromFmt(), true);
