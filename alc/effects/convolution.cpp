@@ -3,14 +3,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <iterator>
 #include <memory>
-#include <utility>
 #include <vector>
+#include <variant>
 
 #ifdef HAVE_SSE_INTRINSICS
 #include <xmmintrin.h>
@@ -30,13 +30,17 @@
 #include "core/context.h"
 #include "core/devformat.h"
 #include "core/device.h"
+#include "core/effects/base.h"
 #include "core/effectslot.h"
 #include "core/filters/splitter.h"
 #include "core/fmt_traits.h"
 #include "core/mixer.h"
+#include "core/uhjfilter.h"
 #include "intrusive_ptr.h"
+#include "opthelpers.h"
 #include "pffft.h"
 #include "polyphase_resampler.h"
+#include "vecmat.h"
 #include "vector.h"
 
 
@@ -284,7 +288,7 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
     mChannels = buffer->mChannels;
     mAmbiLayout = IsUHJ(mChannels) ? AmbiLayout::FuMa : buffer->mAmbiLayout;
     mAmbiScaling = IsUHJ(mChannels) ? AmbiScaling::UHJ : buffer->mAmbiScaling;
-    mAmbiOrder = minu(buffer->mAmbiOrder, MaxConvolveAmbiOrder);
+    mAmbiOrder = std::min(buffer->mAmbiOrder, MaxConvolveAmbiOrder);
 
     const auto bytesPerSample = BytesFromFmt(buffer->mType);
     const auto realChannels = buffer->channelsFromFmt();
@@ -317,7 +321,7 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
      * segment is allocated to simplify handling.
      */
     mNumConvolveSegs = (resampledCount+(ConvolveUpdateSamples-1)) / ConvolveUpdateSamples;
-    mNumConvolveSegs = maxz(mNumConvolveSegs, 2) - 1;
+    mNumConvolveSegs = std::max(mNumConvolveSegs, 2_uz) - 1_uz;
 
     const size_t complex_length{mNumConvolveSegs * ConvolveUpdateSize * (numChannels+1)};
     mComplexData.resize(complex_length, 0.0f);
@@ -361,14 +365,14 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
         /* Store the first segment's samples in reverse in the time-domain, to
          * apply as a FIR filter.
          */
-        const size_t first_size{minz(resampledCount, ConvolveUpdateSamples)};
+        const size_t first_size{std::min(size_t{resampledCount}, ConvolveUpdateSamples)};
         std::transform(ressamples.data(), ressamples.data()+first_size, mFilter[c].rbegin(),
             [](const double d) noexcept -> float { return static_cast<float>(d); });
 
         size_t done{first_size};
         for(size_t s{0};s < mNumConvolveSegs;++s)
         {
-            const size_t todo{minz(resampledCount-done, ConvolveUpdateSamples)};
+            const size_t todo{std::min(resampledCount-done, ConvolveUpdateSamples)};
 
             /* Apply a double-precision forward FFT for more precise frequency
              * measurements.
@@ -459,7 +463,7 @@ void ConvolutionState::update(const ContextBase *context, const EffectSlot *slot
     mMix = &ConvolutionState::NormalMix;
 
     for(auto &chan : mChans)
-        std::fill(std::begin(chan.Target), std::end(chan.Target), 0.0f);
+        std::fill(chan.Target.begin(), chan.Target.end(), 0.0f);
     const float gain{slot->Gain};
     if(IsAmbisonic(mChannels))
     {
@@ -609,7 +613,7 @@ void ConvolutionState::process(const size_t samplesToDo,
 
     for(size_t base{0u};base < samplesToDo;)
     {
-        const size_t todo{minz(ConvolveUpdateSamples-mFifoPos, samplesToDo-base)};
+        const size_t todo{std::min(ConvolveUpdateSamples-mFifoPos, samplesToDo-base)};
 
         std::copy_n(samplesIn[0].begin() + base, todo,
             mInput.begin()+ConvolveUpdateSamples+mFifoPos);

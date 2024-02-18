@@ -30,6 +30,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -39,7 +41,7 @@
 #include <vector>
 
 #include "albit.h"
-#include "alfstream.h"
+#include "almalloc.h"
 #include "alnumeric.h"
 #include "alspan.h"
 #include "alstring.h"
@@ -210,18 +212,18 @@ static int TrLoad(TokenReaderT *tr)
         // Load TRLoadSize (or less if at the end of the file) per read.
         toLoad = TRLoadSize;
 
-        const auto in = static_cast<uint>(tr->mIn&TRRingMask);
+        const auto in = tr->mIn&TRRingMask;
         std::streamsize count{TRRingSize - in};
         if(count < toLoad)
         {
-            istream.read(&tr->mRing[in], count);
+            istream.read(al::to_address(tr->mRing.begin() + in), count);
             tr->mIn += istream.gcount();
-            istream.read(&tr->mRing[0], toLoad-count);
+            istream.read(tr->mRing.data(), toLoad-count);
             tr->mIn += istream.gcount();
         }
         else
         {
-            istream.read(&tr->mRing[in], toLoad);
+            istream.read(al::to_address(tr->mRing.begin() + in), toLoad);
             tr->mIn += istream.gcount();
         }
 
@@ -248,21 +250,23 @@ static void TrErrorVA(const TokenReaderT *tr, uint line, uint column, const char
 // Used to display an error at a saved line/column.
 static void TrErrorAt(const TokenReaderT *tr, uint line, uint column, const char *format, ...)
 {
+    /* NOLINTBEGIN(*-array-to-pointer-decay) */
     va_list argPtr;
-
     va_start(argPtr, format);
     TrErrorVA(tr, line, column, format, argPtr);
     va_end(argPtr);
+    /* NOLINTEND(*-array-to-pointer-decay) */
 }
 
 // Used to display an error at the current line/column.
 static void TrError(const TokenReaderT *tr, const char *format, ...)
 {
+    /* NOLINTBEGIN(*-array-to-pointer-decay) */
     va_list argPtr;
-
     va_start(argPtr, format);
     TrErrorVA(tr, tr->mLine, tr->mColumn, format, argPtr);
     va_end(argPtr);
+    /* NOLINTEND(*-array-to-pointer-decay) */
 }
 
 // Skips to the next line.
@@ -915,7 +919,7 @@ static int ReadWaveList(std::istream &istream, const SourceRefT *src, const Byte
                 return 0;
             return 1;
         }
-        else if(fourCC == FOURCC_LIST)
+        if(fourCC == FOURCC_LIST)
         {
             if(!ReadBin4(istream, src->mPath.data(), BO_LITTLE, 4, &fourCC))
                 return 0;
@@ -1204,13 +1208,14 @@ static int LoadSofaSource(SourceRefT *src, const uint hrirRate, const uint n, do
 // Load a source HRIR from a supported file type.
 static int LoadSource(SourceRefT *src, const uint hrirRate, const uint n, double *hrir)
 {
-    std::unique_ptr<al::ifstream> istream;
+    std::unique_ptr<std::istream> istream;
     if(src->mFormat != SF_SOFA)
     {
         if(src->mFormat == SF_ASCII)
-            istream = std::make_unique<al::ifstream>(src->mPath.data());
+            istream = std::make_unique<std::ifstream>(std::filesystem::u8path(src->mPath.data()));
         else
-            istream = std::make_unique<al::ifstream>(src->mPath.data(), std::ios::binary);
+            istream = std::make_unique<std::ifstream>(std::filesystem::u8path(src->mPath.data()),
+                std::ios::binary);
         if(!istream->good())
         {
             fprintf(stderr, "\nError: Could not open source file '%s'.\n", src->mPath.data());
@@ -1309,7 +1314,7 @@ static int ProcessMetrics(TokenReaderT *tr, const uint fftSize, const uint trunc
                 TrErrorAt(tr, line, col, "Expected a channel type.\n");
                 return 0;
             }
-            else if(hData->mChannelType == CT_STEREO)
+            if(hData->mChannelType == CT_STEREO)
             {
                 if(chanMode == CM_ForceMono)
                     hData->mChannelType = CT_MONO;
@@ -1987,7 +1992,7 @@ static int ProcessSources(TokenReaderT *tr, HrirDataT *hData, const uint outRate
                 TrErrorAt(tr, line, col, "Missing left ear source reference(s).\n");
                 return 0;
             }
-            else if(azd->mIrs[1] == nullptr)
+            if(azd->mIrs[1] == nullptr)
             {
                 TrErrorAt(tr, line, col, "Missing right ear source reference(s).\n");
                 return 0;

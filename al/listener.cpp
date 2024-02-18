@@ -30,9 +30,7 @@
 #include "AL/efx.h"
 
 #include "alc/context.h"
-#include "almalloc.h"
-#include "atomic.h"
-#include "core/except.h"
+#include "alc/inprogext.h"
 #include "direct_defs.h"
 #include "opthelpers.h"
 
@@ -73,7 +71,7 @@ AL_API DECL_FUNC2(void, alListenerf, ALenum, ALfloat)
 FORCE_ALIGN void AL_APIENTRY alListenerfDirect(ALCcontext *context, ALenum param, ALfloat value) noexcept
 {
     ALlistener &listener = context->mListener;
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     switch(param)
     {
     case AL_GAIN:
@@ -100,7 +98,7 @@ FORCE_ALIGN void AL_APIENTRY alListener3fDirect(ALCcontext *context, ALenum para
     ALfloat value2, ALfloat value3) noexcept
 {
     ALlistener &listener = context->mListener;
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     switch(param)
     {
     case AL_POSITION:
@@ -147,7 +145,7 @@ FORCE_ALIGN void AL_APIENTRY alListenerfvDirect(ALCcontext *context, ALenum para
     }
 
     ALlistener &listener = context->mListener;
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     switch(param)
     {
     case AL_ORIENTATION:
@@ -173,7 +171,7 @@ FORCE_ALIGN void AL_APIENTRY alListenerfvDirect(ALCcontext *context, ALenum para
 AL_API DECL_FUNC2(void, alListeneri, ALenum, ALint)
 FORCE_ALIGN void AL_APIENTRY alListeneriDirect(ALCcontext *context, ALenum param, ALint /*value*/) noexcept
 {
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     switch(param)
     {
     default:
@@ -194,7 +192,7 @@ FORCE_ALIGN void AL_APIENTRY alListener3iDirect(ALCcontext *context, ALenum para
         return;
     }
 
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     switch(param)
     {
     default:
@@ -218,7 +216,7 @@ FORCE_ALIGN void AL_APIENTRY alListenerivDirect(ALCcontext *context, ALenum para
         return;
 
     case AL_ORIENTATION:
-        const ALfloat fvals[6]{
+        const std::array fvals{
             static_cast<ALfloat>(values[0]),
             static_cast<ALfloat>(values[1]),
             static_cast<ALfloat>(values[2]),
@@ -226,11 +224,11 @@ FORCE_ALIGN void AL_APIENTRY alListenerivDirect(ALCcontext *context, ALenum para
             static_cast<ALfloat>(values[4]),
             static_cast<ALfloat>(values[5]),
         };
-        alListenerfvDirect(context, param, fvals);
+        alListenerfvDirect(context, param, fvals.data());
         return;
     }
 
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     switch(param)
     {
     default:
@@ -244,7 +242,7 @@ FORCE_ALIGN void AL_APIENTRY alGetListenerfDirect(ALCcontext *context, ALenum pa
     ALfloat *value) noexcept
 {
     ALlistener &listener = context->mListener;
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     if(!value)
         context->setError(AL_INVALID_VALUE, "NULL pointer");
     else switch(param)
@@ -267,7 +265,7 @@ FORCE_ALIGN void AL_APIENTRY alGetListener3fDirect(ALCcontext *context, ALenum p
     ALfloat *value1, ALfloat *value2, ALfloat *value3) noexcept
 {
     ALlistener &listener = context->mListener;
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     if(!value1 || !value2 || !value3)
         context->setError(AL_INVALID_VALUE, "NULL pointer");
     else switch(param)
@@ -307,7 +305,7 @@ FORCE_ALIGN void AL_APIENTRY alGetListenerfvDirect(ALCcontext *context, ALenum p
     }
 
     ALlistener &listener = context->mListener;
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     if(!values)
         context->setError(AL_INVALID_VALUE, "NULL pointer");
     else switch(param)
@@ -331,7 +329,7 @@ FORCE_ALIGN void AL_APIENTRY alGetListenerfvDirect(ALCcontext *context, ALenum p
 AL_API DECL_FUNC2(void, alGetListeneri, ALenum, ALint*)
 FORCE_ALIGN void AL_APIENTRY alGetListeneriDirect(ALCcontext *context, ALenum param, ALint *value) noexcept
 {
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     if(!value)
         context->setError(AL_INVALID_VALUE, "NULL pointer");
     else switch(param)
@@ -346,7 +344,7 @@ FORCE_ALIGN void AL_APIENTRY alGetListener3iDirect(ALCcontext *context, ALenum p
     ALint *value1, ALint *value2, ALint *value3) noexcept
 {
     ALlistener &listener = context->mListener;
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     if(!value1 || !value2 || !value3)
         context->setError(AL_INVALID_VALUE, "NULL pointer");
     else switch(param)
@@ -381,7 +379,7 @@ FORCE_ALIGN void AL_APIENTRY alGetListenerivDirect(ALCcontext *context, ALenum p
     }
 
     ALlistener &listener = context->mListener;
-    std::lock_guard<std::mutex> _{context->mPropLock};
+    std::lock_guard<std::mutex> proplock{context->mPropLock};
     if(!values)
         context->setError(AL_INVALID_VALUE, "NULL pointer");
     else switch(param)

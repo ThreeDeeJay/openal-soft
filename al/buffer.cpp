@@ -28,16 +28,16 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <new>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -51,11 +51,13 @@
 #include "alc/inprogext.h"
 #include "almalloc.h"
 #include "alnumeric.h"
-#include "atomic.h"
-#include "core/except.h"
+#include "alspan.h"
+#include "core/device.h"
 #include "core/logging.h"
+#include "core/resampler_limits.h"
 #include "core/voice.h"
 #include "direct_defs.h"
+#include "intrusive_ptr.h"
 #include "opthelpers.h"
 
 #ifdef ALSOFT_EAX
@@ -68,9 +70,9 @@
 
 namespace {
 
-using SubListAllocator = typename al::allocator<std::array<ALbuffer,64>>;
+using SubListAllocator = al::allocator<std::array<ALbuffer,64>>;
 
-std::optional<AmbiLayout> AmbiLayoutFromEnum(ALenum layout)
+std::optional<AmbiLayout> AmbiLayoutFromEnum(ALenum layout) noexcept
 {
     switch(layout)
     {
@@ -89,7 +91,7 @@ ALenum EnumFromAmbiLayout(AmbiLayout layout)
     throw std::runtime_error{"Invalid AmbiLayout: "+std::to_string(int(layout))};
 }
 
-std::optional<AmbiScaling> AmbiScalingFromEnum(ALenum scale)
+std::optional<AmbiScaling> AmbiScalingFromEnum(ALenum scale) noexcept
 {
     switch(scale)
     {
@@ -112,7 +114,7 @@ ALenum EnumFromAmbiScaling(AmbiScaling scale)
 }
 
 #ifdef ALSOFT_EAX
-std::optional<EaxStorage> EaxStorageFromEnum(ALenum scale)
+std::optional<EaxStorage> EaxStorageFromEnum(ALenum scale) noexcept
 {
     switch(scale)
     {
@@ -158,7 +160,7 @@ void eax_x_ram_apply(ALCdevice &device, ALbuffer &buffer) noexcept
     }
 }
 
-void eax_x_ram_clear(ALCdevice& al_device, ALbuffer& al_buffer)
+void eax_x_ram_clear(ALCdevice& al_device, ALbuffer& al_buffer) noexcept
 {
     if(al_buffer.eax_x_ram_is_hardware)
         al_device.eax_x_ram_free_size += al_buffer.OriginalSize;
@@ -190,7 +192,7 @@ bool EnsureBuffers(ALCdevice *device, size_t needed)
             sublist.FreeMask = ~0_u64;
             sublist.Buffers = SubListAllocator{}.allocate(1);
             device->BufferList.emplace_back(std::move(sublist));
-            count += 64;
+            count += std::tuple_size_v<SubListAllocator::value_type>;
         }
     }
     catch(...) {
@@ -354,7 +356,7 @@ void LoadData(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq, ALuint size,
         auto newdata = decltype(ALBuf->mDataStorage)(newsize, std::byte{});
         if((access&AL_PRESERVE_DATA_BIT_SOFT))
         {
-            const size_t tocopy{minz(newdata.size(), ALBuf->mDataStorage.size())};
+            const size_t tocopy{std::min(newdata.size(), ALBuf->mDataStorage.size())};
             std::copy_n(ALBuf->mDataStorage.begin(), tocopy, newdata.begin());
         }
         newdata.swap(ALBuf->mDataStorage);
@@ -668,7 +670,7 @@ FORCE_ALIGN void AL_APIENTRY alGenBuffersDirect(ALCcontext *context, ALsizei n, 
     if(n <= 0) UNLIKELY return;
 
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
     if(!EnsureBuffers(device, static_cast<ALuint>(n)))
     {
         context->setError(AL_OUT_OF_MEMORY, "Failed to allocate %d buffer%s", n, (n==1)?"":"s");
@@ -678,8 +680,7 @@ FORCE_ALIGN void AL_APIENTRY alGenBuffersDirect(ALCcontext *context, ALsizei n, 
     if(n == 1) LIKELY
     {
         /* Special handling for the easy and normal case. */
-        ALbuffer *buffer{AllocBuffer(device)};
-        buffers[0] = buffer->id;
+        *buffers = AllocBuffer(device)->id;
     }
     else
     {
@@ -692,7 +693,8 @@ FORCE_ALIGN void AL_APIENTRY alGenBuffersDirect(ALCcontext *context, ALsizei n, 
             ALbuffer *buffer{AllocBuffer(device)};
             ids.emplace_back(buffer->id);
         } while(--n);
-        std::copy(ids.begin(), ids.end(), buffers);
+        const al::span bids{buffers, static_cast<ALuint>(n)};
+        std::copy(ids.cbegin(), ids.cend(), bids.begin());
     }
 }
 
@@ -705,7 +707,7 @@ FORCE_ALIGN void AL_APIENTRY alDeleteBuffersDirect(ALCcontext *context, ALsizei 
     if(n <= 0) UNLIKELY return;
 
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     /* First try to find any buffers that are invalid or in-use. */
     auto validate_buffer = [device, &context](const ALuint bid) -> bool
@@ -724,9 +726,10 @@ FORCE_ALIGN void AL_APIENTRY alDeleteBuffersDirect(ALCcontext *context, ALsizei 
         }
         return true;
     };
-    const ALuint *buffers_end = buffers + n;
-    auto invbuf = std::find_if_not(buffers, buffers_end, validate_buffer);
-    if(invbuf != buffers_end) UNLIKELY return;
+
+    const al::span bids{buffers, static_cast<ALuint>(n)};
+    auto invbuf = std::find_if_not(bids.begin(), bids.end(), validate_buffer);
+    if(invbuf != bids.end()) UNLIKELY return;
 
     /* All good. Delete non-0 buffer IDs. */
     auto delete_buffer = [device](const ALuint bid) -> void
@@ -734,14 +737,14 @@ FORCE_ALIGN void AL_APIENTRY alDeleteBuffersDirect(ALCcontext *context, ALsizei 
         ALbuffer *buffer{bid ? LookupBuffer(device, bid) : nullptr};
         if(buffer) FreeBuffer(device, buffer);
     };
-    std::for_each(buffers, buffers_end, delete_buffer);
+    std::for_each(bids.begin(), bids.end(), delete_buffer);
 }
 
 AL_API DECL_FUNC1(ALboolean, alIsBuffer, ALuint)
 FORCE_ALIGN ALboolean AL_APIENTRY alIsBufferDirect(ALCcontext *context, ALuint buffer) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
     if(!buffer || LookupBuffer(device, buffer))
         return AL_TRUE;
     return AL_FALSE;
@@ -763,9 +766,9 @@ FORCE_ALIGN void AL_APIENTRY alBufferStorageDirectSOFT(ALCcontext *context, ALui
     ALenum format, const ALvoid *data, ALsizei size, ALsizei freq, ALbitfieldSOFT flags) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if(size < 0) UNLIKELY
@@ -796,9 +799,9 @@ FORCE_ALIGN void AL_APIENTRY alBufferDataStaticDirect(ALCcontext *context, const
     ALenum format, ALvoid *data, ALsizei size, ALsizei freq) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         return context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     if(size < 0) UNLIKELY
@@ -819,9 +822,9 @@ FORCE_ALIGN void* AL_APIENTRY alMapBufferDirectSOFT(ALCcontext *context, ALuint 
     ALsizei offset, ALsizei length, ALbitfieldSOFT access) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if((access&INVALID_MAP_FLAGS) != 0) UNLIKELY
@@ -870,9 +873,9 @@ AL_API DECL_FUNCEXT1(void, alUnmapBuffer,SOFT, ALuint)
 FORCE_ALIGN void AL_APIENTRY alUnmapBufferDirectSOFT(ALCcontext *context, ALuint buffer) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if(albuf->MappedAccess == 0) UNLIKELY
@@ -890,9 +893,9 @@ FORCE_ALIGN void AL_APIENTRY alFlushMappedBufferDirectSOFT(ALCcontext *context, 
     ALsizei offset, ALsizei length) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if(!(albuf->MappedAccess&AL_MAP_WRITE_BIT_SOFT)) UNLIKELY
@@ -919,9 +922,9 @@ FORCE_ALIGN void AL_APIENTRY alBufferSubDataDirectSOFT(ALCcontext *context, ALui
     ALenum format, const ALvoid *data, ALsizei offset, ALsizei length) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         return context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
 
@@ -976,7 +979,7 @@ FORCE_ALIGN void AL_APIENTRY alBufferfDirect(ALCcontext *context, ALuint buffer,
     ALfloat /*value*/) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
@@ -992,7 +995,7 @@ FORCE_ALIGN void AL_APIENTRY alBuffer3fDirect(ALCcontext *context, ALuint buffer
     ALfloat /*value1*/, ALfloat /*value2*/, ALfloat /*value3*/) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
@@ -1008,7 +1011,7 @@ FORCE_ALIGN void AL_APIENTRY alBufferfvDirect(ALCcontext *context, ALuint buffer
     const ALfloat *values) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
@@ -1027,9 +1030,9 @@ FORCE_ALIGN void AL_APIENTRY alBufferiDirect(ALCcontext *context, ALuint buffer,
     ALint value) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else switch(param)
@@ -1085,7 +1088,7 @@ FORCE_ALIGN void AL_APIENTRY alBuffer3iDirect(ALCcontext *context, ALuint buffer
     ALint /*value1*/, ALint /*value2*/, ALint /*value3*/) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
@@ -1115,7 +1118,7 @@ FORCE_ALIGN void AL_APIENTRY alBufferivDirect(ALCcontext *context, ALuint buffer
     }
 
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     ALbuffer *albuf = LookupBuffer(device, buffer);
     if(!albuf) UNLIKELY
@@ -1148,9 +1151,9 @@ FORCE_ALIGN void AL_APIENTRY alGetBufferfDirect(ALCcontext *context, ALuint buff
     ALfloat *value) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if(!value) UNLIKELY
@@ -1172,7 +1175,7 @@ FORCE_ALIGN void AL_APIENTRY alGetBuffer3fDirect(ALCcontext *context, ALuint buf
     ALfloat *value1, ALfloat *value2, ALfloat *value3) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
@@ -1197,7 +1200,7 @@ FORCE_ALIGN void AL_APIENTRY alGetBufferfvDirect(ALCcontext *context, ALuint buf
     }
 
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
@@ -1216,8 +1219,8 @@ FORCE_ALIGN void AL_APIENTRY alGetBufferiDirect(ALCcontext *context, ALuint buff
     ALint *value) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if(!value) UNLIKELY
@@ -1280,7 +1283,7 @@ FORCE_ALIGN void AL_APIENTRY alGetBuffer3iDirect(ALCcontext *context, ALuint buf
     ALint *value1, ALint *value2, ALint *value3) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
     if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if(!value1 || !value2 || !value3) UNLIKELY
@@ -1315,8 +1318,8 @@ FORCE_ALIGN void AL_APIENTRY alGetBufferivDirect(ALCcontext *context, ALuint buf
     }
 
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if(!values) UNLIKELY
@@ -1339,9 +1342,9 @@ FORCE_ALIGN void AL_APIENTRY alBufferCallbackDirectSOFT(ALCcontext *context, ALu
     ALenum format, ALsizei freq, ALBUFFERCALLBACKTYPESOFT callback, ALvoid *userptr) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if(freq < 1) UNLIKELY
@@ -1364,8 +1367,8 @@ FORCE_ALIGN void AL_APIENTRY alGetBufferPtrDirectSOFT(ALCcontext *context, ALuin
     ALenum param, ALvoid **value) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
-    ALbuffer *albuf = LookupBuffer(device, buffer);
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
     if(!albuf) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if(!value) UNLIKELY
@@ -1389,7 +1392,7 @@ FORCE_ALIGN void AL_APIENTRY alGetBuffer3PtrDirectSOFT(ALCcontext *context, ALui
     ALenum param, ALvoid **value1, ALvoid **value2, ALvoid **value3) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
     if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if(!value1 || !value2 || !value3) UNLIKELY
@@ -1414,7 +1417,7 @@ FORCE_ALIGN void AL_APIENTRY alGetBufferPtrvDirectSOFT(ALCcontext *context, ALui
     }
 
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
     if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
         context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
     else if(!values) UNLIKELY
@@ -1468,7 +1471,7 @@ AL_API ALboolean AL_APIENTRY alIsBufferFormatSupportedSOFT(ALenum /*format*/) no
 void ALbuffer::SetName(ALCcontext *context, ALuint id, std::string_view name)
 {
     ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> _{device->BufferLock};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     auto buffer = LookupBuffer(device, id);
     if(!buffer) UNLIKELY
@@ -1532,7 +1535,7 @@ FORCE_ALIGN ALboolean AL_APIENTRY EAXSetBufferModeDirect(ALCcontext *context, AL
     }
 
     auto device = context->mALDevice.get();
-    std::lock_guard<std::mutex> device_lock{device->BufferLock};
+    std::lock_guard<std::mutex> devlock{device->BufferLock};
 
     /* Special-case setting a single buffer, to avoid extraneous allocations. */
     if(n == 1)
@@ -1652,7 +1655,7 @@ FORCE_ALIGN ALenum AL_APIENTRY EAXGetBufferModeDirect(ALCcontext *context, ALuin
     }
 
     auto device = context->mALDevice.get();
-    std::lock_guard<std::mutex> device_lock{device->BufferLock};
+    std::lock_guard<std::mutex> devlock{device->BufferLock};
 
     const auto al_buffer = LookupBuffer(device, buffer);
     if(!al_buffer)

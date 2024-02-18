@@ -325,9 +325,8 @@ struct DeviceBase {
     /** Waits for the mixer to not be mixing or updating the clock. */
     [[nodiscard]] auto waitForMix() const noexcept -> uint
     {
-        uint refcount;
-        while((refcount=mMixCount.load(std::memory_order_acquire))&1) {
-        }
+        uint refcount{mMixCount.load(std::memory_order_acquire)};
+        while((refcount&1)) refcount = mMixCount.load(std::memory_order_acquire);
         return refcount;
     }
 
@@ -378,8 +377,10 @@ private:
 
 /* Must be less than 15 characters (16 including terminating null) for
  * compatibility with pthread_setname_np limitations. */
-#define MIXER_THREAD_NAME "alsoft-mixer"
+[[nodiscard]] constexpr
+auto GetMixerThreadName() noexcept -> const char* { return "alsoft-mixer"; }
 
-#define RECORD_THREAD_NAME "alsoft-record"
+[[nodiscard]] constexpr
+auto GetRecordThreadName() noexcept -> const char* { return "alsoft-record"; }
 
 #endif /* CORE_DEVICE_H */

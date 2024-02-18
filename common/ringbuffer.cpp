@@ -23,15 +23,15 @@
 #include "ringbuffer.h"
 
 #include <algorithm>
-#include <climits>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 
-#include "almalloc.h"
+#include "alnumeric.h"
 
 
-RingBufferPtr RingBuffer::Create(std::size_t sz, std::size_t elem_sz, int limit_writes)
+RingBufferPtr RingBuffer::Create(std::size_t sz, std::size_t elem_sz, bool limit_writes)
 {
     std::size_t power_of_two{0u};
     if(sz > 0)
@@ -74,18 +74,9 @@ std::size_t RingBuffer::read(void *dest, std::size_t cnt) noexcept
     const std::size_t to_read{std::min(cnt, free_cnt)};
     std::size_t read_ptr{mReadPtr.load(std::memory_order_relaxed) & mSizeMask};
 
-    std::size_t n1, n2;
     const std::size_t cnt2{read_ptr + to_read};
-    if(cnt2 > mSizeMask+1)
-    {
-        n1 = mSizeMask+1 - read_ptr;
-        n2 = cnt2 & mSizeMask;
-    }
-    else
-    {
-        n1 = to_read;
-        n2 = 0;
-    }
+    const auto [n1, n2] = (cnt2 <= mSizeMask+1) ? std::make_tuple(to_read, 0_uz)
+        : std::make_tuple(mSizeMask+1 - read_ptr, cnt2&mSizeMask);
 
     auto outiter = std::copy_n(mBuffer.begin() + read_ptr*mElemSize, n1*mElemSize,
         static_cast<std::byte*>(dest));
@@ -107,18 +98,9 @@ std::size_t RingBuffer::peek(void *dest, std::size_t cnt) const noexcept
     const std::size_t to_read{std::min(cnt, free_cnt)};
     std::size_t read_ptr{mReadPtr.load(std::memory_order_relaxed) & mSizeMask};
 
-    std::size_t n1, n2;
     const std::size_t cnt2{read_ptr + to_read};
-    if(cnt2 > mSizeMask+1)
-    {
-        n1 = mSizeMask+1 - read_ptr;
-        n2 = cnt2 & mSizeMask;
-    }
-    else
-    {
-        n1 = to_read;
-        n2 = 0;
-    }
+    const auto [n1, n2] = (cnt2 <= mSizeMask+1) ? std::make_tuple(to_read, 0_uz)
+        : std::make_tuple(mSizeMask+1 - read_ptr, cnt2&mSizeMask);
 
     auto outiter = std::copy_n(mBuffer.begin() + read_ptr*mElemSize, n1*mElemSize,
         static_cast<std::byte*>(dest));
@@ -135,18 +117,9 @@ std::size_t RingBuffer::write(const void *src, std::size_t cnt) noexcept
     const std::size_t to_write{std::min(cnt, free_cnt)};
     std::size_t write_ptr{mWritePtr.load(std::memory_order_relaxed) & mSizeMask};
 
-    std::size_t n1, n2;
     const std::size_t cnt2{write_ptr + to_write};
-    if(cnt2 > mSizeMask+1)
-    {
-        n1 = mSizeMask+1 - write_ptr;
-        n2 = cnt2 & mSizeMask;
-    }
-    else
-    {
-        n1 = to_write;
-        n2 = 0;
-    }
+    const auto [n1, n2] = (cnt2 <= mSizeMask+1) ? std::make_tuple(to_write, 0_uz)
+        : std::make_tuple(mSizeMask+1 - write_ptr, cnt2&mSizeMask);
 
     auto srcbytes = static_cast<const std::byte*>(src);
     std::copy_n(srcbytes, n1*mElemSize, mBuffer.begin() + write_ptr*mElemSize);

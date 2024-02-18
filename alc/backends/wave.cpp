@@ -31,6 +31,7 @@
 #include <cstring>
 #include <exception>
 #include <functional>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -38,6 +39,7 @@
 #include "alc/alconfig.h"
 #include "almalloc.h"
 #include "alnumeric.h"
+#include "alstring.h"
 #include "althrd_setname.h"
 #include "core/device.h"
 #include "core/helpers.h"
@@ -48,6 +50,7 @@
 
 namespace {
 
+using namespace std::string_view_literals;
 using std::chrono::seconds;
 using std::chrono::milliseconds;
 using std::chrono::nanoseconds;
@@ -60,8 +63,7 @@ struct FileDeleter {
 };
 using FilePtr = std::unique_ptr<FILE,FileDeleter>;
 
-/* NOLINTNEXTLINE(*-avoid-c-arrays) */
-constexpr char waveDevice[] = "Wave File Writer";
+[[nodiscard]] constexpr auto GetDeviceName() noexcept { return "Wave File Writer"sv; }
 
 constexpr std::array<ubyte,16> SUBTYPE_PCM{{
     0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa,
@@ -122,7 +124,7 @@ int WaveBackend::mixerProc()
 {
     const milliseconds restTime{mDevice->UpdateSize*1000/mDevice->Frequency / 2};
 
-    althrd_setname(MIXER_THREAD_NAME);
+    althrd_setname(GetMixerThreadName());
 
     const size_t frameStep{mDevice->channelsFromFmt()};
     const size_t frameSize{mDevice->frameSizeFromFmt()};
@@ -200,10 +202,10 @@ void WaveBackend::open(std::string_view name)
         "No wave output filename"};
 
     if(name.empty())
-        name = waveDevice;
-    else if(name != waveDevice)
+        name = GetDeviceName();
+    else if(name != GetDeviceName())
         throw al::backend_exception{al::backend_error::NoDevice, "Device name \"%.*s\" not found",
-            static_cast<int>(name.length()), name.data()};
+            al::sizei(name), name.data()};
 
     /* There's only one "device", so if it's already open, we're done. */
     if(mFile) return;
@@ -218,7 +220,7 @@ void WaveBackend::open(std::string_view name)
 #endif
     if(!mFile)
         throw al::backend_exception{al::backend_error::DeviceError, "Could not open file '%s': %s",
-            fname->c_str(), strerror(errno)};
+            fname->c_str(), std::generic_category().message(errno).c_str()};
 
     mDevice->DeviceName = name;
 }
@@ -270,7 +272,7 @@ bool WaveBackend::reset()
     case DevFmtX3D71: chanmask = 0x01 | 0x02 | 0x04 | 0x08 | 0x010 | 0x020 | 0x200 | 0x400; break;
     case DevFmtAmbi3D:
         /* .amb output requires FuMa */
-        mDevice->mAmbiOrder = minu(mDevice->mAmbiOrder, 3);
+        mDevice->mAmbiOrder = std::min(mDevice->mAmbiOrder, 3u);
         mDevice->mAmbiLayout = DevAmbiLayout::FuMa;
         mDevice->mAmbiScale = DevAmbiScaling::FuMa;
         isbformat = true;
@@ -318,7 +320,7 @@ bool WaveBackend::reset()
 
     if(ferror(mFile.get()))
     {
-        ERR("Error writing header: %s\n", strerror(errno));
+        ERR("Error writing header: %s\n", std::generic_category().message(errno).c_str());
         return false;
     }
     mDataStart = ftell(mFile.get());
@@ -376,17 +378,15 @@ bool WaveBackendFactory::querySupport(BackendType type)
 
 std::string WaveBackendFactory::probe(BackendType type)
 {
-    std::string outnames;
     switch(type)
     {
     case BackendType::Playback:
-        /* Includes null char. */
-        outnames.append(waveDevice, sizeof(waveDevice));
-        break;
+        /* Include null char. */
+        return std::string{GetDeviceName()} + '\0';
     case BackendType::Capture:
         break;
     }
-    return outnames;
+    return std::string{};
 }
 
 BackendPtr WaveBackendFactory::createBackend(DeviceBase *device, BackendType type)

@@ -107,15 +107,14 @@ namespace {
 
 using uint = unsigned int;
 using namespace std::chrono;
-
-using namespace std::placeholders;
+using namespace std::string_view_literals;
 
 float InitConeScale()
 {
     float ret{1.0f};
     if(auto optval = al::getenv("__ALSOFT_HALF_ANGLE_CONES"))
     {
-        if(al::strcasecmp(optval->c_str(), "true") == 0
+        if(al::case_compare(*optval, "true"sv) == 0
             || strtol(optval->c_str(), nullptr, 0) == 1)
             ret *= 0.5f;
     }
@@ -164,7 +163,7 @@ inline void BsincPrepare(const uint increment, BsincState *state, const BSincTab
     if(increment > MixerFracOne)
     {
         sf = MixerFracOne/static_cast<float>(increment) - table->scaleBase;
-        sf = maxf(0.0f, BSincScaleCount*sf*table->scaleRange - 1.0f);
+        sf = std::max(0.0f, BSincScaleCount*sf*table->scaleRange - 1.0f);
         si = float2uint(sf);
         /* The interpolation factor is fit to this diagonally-symmetric curve
          * to reduce the transition ripple caused by interpolating different
@@ -203,6 +202,14 @@ inline ResamplerFunc SelectResampler(Resampler resampler, uint increment)
 #ifdef HAVE_NEON
         if((CPUCapFlags&CPU_CAP_NEON))
             return Resample_<CubicTag,NEONTag>;
+#endif
+#ifdef HAVE_SSE4_1
+        if((CPUCapFlags&CPU_CAP_SSE4_1))
+            return Resample_<CubicTag,SSE4Tag>;
+#endif
+#ifdef HAVE_SSE2
+        if((CPUCapFlags&CPU_CAP_SSE2))
+            return Resample_<CubicTag,SSE2Tag>;
 #endif
 #ifdef HAVE_SSE
         if((CPUCapFlags&CPU_CAP_SSE))
@@ -249,7 +256,7 @@ void aluInit(CompatFlagBitset flags, const float nfcscale)
     YScale = flags.test(CompatFlags::ReverseY) ? -1.0f : 1.0f;
     ZScale = flags.test(CompatFlags::ReverseZ) ? -1.0f : 1.0f;
 
-    NfcScale = clampf(nfcscale, 0.0001f, 10000.0f);
+    NfcScale = std::clamp(nfcscale, 0.0001f, 10000.0f);
 }
 
 
@@ -261,7 +268,7 @@ ResamplerFunc PrepareResampler(Resampler resampler, uint increment, InterpState 
     case Resampler::Linear:
         break;
     case Resampler::Cubic:
-        state->emplace<CubicState>().filter = gCubicSpline.Tab.data();
+        state->emplace<CubicState>().filter = gGaussianFilter.Tab.data();
         break;
     case Resampler::FastBSinc12:
     case Resampler::BSinc12:
@@ -881,7 +888,7 @@ void CalcPanningAndFilters(Voice *voice, const float xpos, const float ypos, con
 
     voice->mFlags.reset(VoiceHasHrtf).reset(VoiceHasNfc);
     if(auto *decoder{voice->mDecoder.get()})
-        decoder->mWidthControl = minf(props->EnhWidth, 0.7f);
+        decoder->mWidthControl = std::min(props->EnhWidth, 0.7f);
 
     if(IsAmbisonic(voice->mFmtChannels))
     {
@@ -903,7 +910,7 @@ void CalcPanningAndFilters(Voice *voice, const float xpos, const float ypos, con
                 /* Clamp the distance for really close sources, to prevent
                  * excessive bass.
                  */
-                const float mdist{maxf(Distance*NfcScale, Device->AvgSpeakerDist/4.0f)};
+                const float mdist{std::max(Distance*NfcScale, Device->AvgSpeakerDist/4.0f)};
                 const float w0{SpeedOfSoundMetersPerSec / (mdist * Frequency)};
 
                 /* Only need to adjust the first channel of a B-Format source. */
@@ -1117,7 +1124,7 @@ void CalcPanningAndFilters(Voice *voice, const float xpos, const float ypos, con
         {
             if(voice->mFmtChannels == FmtMono)
             {
-                const float src_ev{std::asin(clampf(ypos, -1.0f, 1.0f))};
+                const float src_ev{std::asin(std::clamp(ypos, -1.0f, 1.0f))};
                 const float src_az{std::atan2(xpos, -zpos)};
 
                 Device->mHrtf->getCoeffs(src_ev, src_az, Distance*NfcScale, Spread,
@@ -1158,7 +1165,7 @@ void CalcPanningAndFilters(Voice *voice, const float xpos, const float ypos, con
                     pos[2] /= len;
                 }
 
-                const float ev{std::asin(clampf(pos[1], -1.0f, 1.0f))};
+                const float ev{std::asin(std::clamp(pos[1], -1.0f, 1.0f))};
                 const float az{std::atan2(pos[0], -pos[2])};
 
                 Device->mHrtf->getCoeffs(ev, az, Distance*NfcScale, 0.0f,
@@ -1230,7 +1237,7 @@ void CalcPanningAndFilters(Voice *voice, const float xpos, const float ypos, con
                 /* Clamp the distance for really close sources, to prevent
                  * excessive bass.
                  */
-                const float mdist{maxf(Distance*NfcScale, Device->AvgSpeakerDist/4.0f)};
+                const float mdist{std::max(Distance*NfcScale, Device->AvgSpeakerDist/4.0f)};
                 const float w0{SpeedOfSoundMetersPerSec / (mdist * Frequency)};
 
                 /* Adjust NFC filters. */
@@ -1422,20 +1429,20 @@ void CalcNonAttnSourceParams(Voice *voice, const VoiceProps *props, const Contex
     if(Pitch > float{MaxPitch})
         voice->mStep = MaxPitch<<MixerFracBits;
     else
-        voice->mStep = maxu(fastf2u(Pitch * MixerFracOne), 1);
+        voice->mStep = std::max(fastf2u(Pitch * MixerFracOne), 1u);
     voice->mResampler = PrepareResampler(props->mResampler, voice->mStep, &voice->mResampleState);
 
     /* Calculate gains */
     GainTriplet DryGain;
-    DryGain.Base  = minf(clampf(props->Gain, props->MinGain, props->MaxGain) * props->Direct.Gain *
-        context->mParams.Gain, GainMixMax);
+    DryGain.Base  = std::min(std::clamp(props->Gain, props->MinGain, props->MaxGain) *
+        props->Direct.Gain * context->mParams.Gain, GainMixMax);
     DryGain.HF = props->Direct.GainHF;
     DryGain.LF = props->Direct.GainLF;
 
     std::array<GainTriplet,MaxSendCount> WetGain;
     for(uint i{0};i < Device->NumAuxSends;i++)
     {
-        WetGain[i].Base = minf(clampf(props->Gain, props->MinGain, props->MaxGain) *
+        WetGain[i].Base = std::min(std::clamp(props->Gain, props->MinGain, props->MaxGain) *
             props->Send[i].Gain * context->mParams.Gain, GainMixMax);
         WetGain[i].HF = props->Send[i].GainHF;
         WetGain[i].LF = props->Send[i].GainLF;
@@ -1516,7 +1523,7 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
     {
     case DistanceModel::InverseClamped:
         if(props->MaxDistance < props->RefDistance) break;
-        ClampedDist = clampf(ClampedDist, props->RefDistance, props->MaxDistance);
+        ClampedDist = std::clamp(ClampedDist, props->RefDistance, props->MaxDistance);
         /*fall-through*/
     case DistanceModel::Inverse:
         if(props->RefDistance > 0.0f)
@@ -1538,28 +1545,28 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
 
     case DistanceModel::LinearClamped:
         if(props->MaxDistance < props->RefDistance) break;
-        ClampedDist = clampf(ClampedDist, props->RefDistance, props->MaxDistance);
+        ClampedDist = std::clamp(ClampedDist, props->RefDistance, props->MaxDistance);
         /*fall-through*/
     case DistanceModel::Linear:
         if(props->MaxDistance != props->RefDistance)
         {
             float attn{(ClampedDist-props->RefDistance) /
                 (props->MaxDistance-props->RefDistance) * props->RolloffFactor};
-            DryAttnBase = maxf(1.0f - attn, 0.0f);
+            DryAttnBase = std::max(1.0f - attn, 0.0f);
             DryGainBase *= DryAttnBase;
 
             for(size_t i{0};i < NumSends;++i)
             {
                 attn = (ClampedDist-props->RefDistance) /
                     (props->MaxDistance-props->RefDistance) * RoomRolloff[i];
-                WetGainBase[i] *= maxf(1.0f - attn, 0.0f);
+                WetGainBase[i] *= std::max(1.0f - attn, 0.0f);
             }
         }
         break;
 
     case DistanceModel::ExponentClamped:
         if(props->MaxDistance < props->RefDistance) break;
-        ClampedDist = clampf(ClampedDist, props->RefDistance, props->MaxDistance);
+        ClampedDist = std::clamp(ClampedDist, props->RefDistance, props->MaxDistance);
         /*fall-through*/
     case DistanceModel::Exponent:
         if(ClampedDist > 0.0f && props->RefDistance > 0.0f)
@@ -1607,15 +1614,15 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
 
     /* Apply gain and frequency filters */
     GainTriplet DryGain{};
-    DryGainBase = clampf(DryGainBase, props->MinGain, props->MaxGain) * context->mParams.Gain;
-    DryGain.Base = minf(DryGainBase * props->Direct.Gain, GainMixMax);
+    DryGainBase = std::clamp(DryGainBase, props->MinGain, props->MaxGain) * context->mParams.Gain;
+    DryGain.Base = std::min(DryGainBase * props->Direct.Gain, GainMixMax);
     DryGain.HF = ConeHF * props->Direct.GainHF;
     DryGain.LF = props->Direct.GainLF;
 
     std::array<GainTriplet,MaxSendCount> WetGain{};
     for(uint i{0};i < NumSends;i++)
     {
-        WetGainBase[i] = clampf(WetGainBase[i]*WetCone, props->MinGain, props->MaxGain) *
+        WetGainBase[i] = std::clamp(WetGainBase[i]*WetCone, props->MinGain, props->MaxGain) *
             context->mParams.Gain;
         /* If this effect slot's Auxiliary Send Auto is off, then use the dry
          * path distance and cone attenuation, otherwise use the wet (room)
@@ -1624,7 +1631,7 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
          */
         const bool use_room{!UseDryAttnForRoom.test(i)};
         const float gain{use_room ? WetGainBase[i] : DryGainBase};
-        WetGain[i].Base = minf(gain * props->Send[i].Gain, GainMixMax);
+        WetGain[i].Base = std::min(gain * props->Send[i].Gain, GainMixMax);
         WetGain[i].HF = (use_room ? WetConeHF : ConeHF) * props->Send[i].GainHF;
         WetGain[i].LF = props->Send[i].GainLF;
     }
@@ -1659,29 +1666,7 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
             if(!SendSlots[i]->AuxSendAuto)
                 continue;
 
-            GainTriplet DecayDistance;
-            /* Calculate the distances to where this effect's decay reaches
-             * -60dB.
-             */
-            DecayDistance.Base = SendSlots[i]->DecayTime * SpeedOfSoundMetersPerSec;
-            DecayDistance.LF = DecayDistance.Base * SendSlots[i]->DecayLFRatio;
-            DecayDistance.HF = SendSlots[i]->DecayHFRatio;
-            if(SendSlots[i]->DecayHFLimit)
-            {
-                const float airAbsorption{SendSlots[i]->AirAbsorptionGainHF};
-                if(airAbsorption < 1.0f)
-                {
-                    /* Calculate the distance to where this effect's air
-                     * absorption reaches -60dB, and limit the effect's HF
-                     * decay distance (so it doesn't take any longer to decay
-                     * than the air would allow).
-                     */
-                    static constexpr float log10_decaygain{-3.0f/*std::log10(ReverbDecayGain)*/};
-                    const float absorb_dist{log10_decaygain / std::log10(airAbsorption)};
-                    DecayDistance.HF = minf(absorb_dist, DecayDistance.HF);
-                }
-            }
-            DecayDistance.HF *= DecayDistance.Base;
+            const float DecayDistance{SendSlots[i]->DecayTime * SpeedOfSoundMetersPerSec};
 
             /* Apply a decay-time transformation to the wet path, based on the
              * source distance. The initial decay of the reverb effect is
@@ -1693,19 +1678,9 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
              * with the reverb and source rolloff parameters.
              */
             const float baseAttn{DryAttnBase};
-            const float fact{distance_base / DecayDistance.Base};
+            const float fact{distance_base / DecayDistance};
             const float gain{std::pow(ReverbDecayGain, fact)*(1.0f-baseAttn) + baseAttn};
             WetGain[i].Base *= gain;
-
-            if(gain > 0.0f)
-            {
-                const float hffact{distance_base / DecayDistance.HF};
-                const float gainhf{std::pow(ReverbDecayGain, hffact)*(1.0f-baseAttn) + baseAttn};
-                WetGain[i].HF *= minf(gainhf/gain, 1.0f);
-                const float lffact{distance_base / DecayDistance.LF};
-                const float gainlf{std::pow(ReverbDecayGain, lffact)*(1.0f-baseAttn) + baseAttn};
-                WetGain[i].LF *= minf(gainlf/gain, 1.0f);
-            }
         }
     }
 
@@ -1752,7 +1727,7 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
     if(Pitch > float{MaxPitch})
         voice->mStep = MaxPitch<<MixerFracBits;
     else
-        voice->mStep = maxu(fastf2u(Pitch * MixerFracOne), 1);
+        voice->mStep = std::max(fastf2u(Pitch * MixerFracOne), 1u);
     voice->mResampler = PrepareResampler(props->mResampler, voice->mStep, &voice->mResampleState);
 
     float spread{0.0f};
@@ -2105,12 +2080,12 @@ template<> inline int32_t SampleConv(float val) noexcept
      * When scaling and clamping for a signed 32-bit integer, these following
      * values are the best a float can give.
      */
-    return fastf2i(clampf(val*2147483648.0f, -2147483648.0f, 2147483520.0f));
+    return fastf2i(std::clamp(val*2147483648.0f, -2147483648.0f, 2147483520.0f));
 }
 template<> inline int16_t SampleConv(float val) noexcept
-{ return static_cast<int16_t>(fastf2i(clampf(val*32768.0f, -32768.0f, 32767.0f))); }
+{ return static_cast<int16_t>(fastf2i(std::clamp(val*32768.0f, -32768.0f, 32767.0f))); }
 template<> inline int8_t SampleConv(float val) noexcept
-{ return static_cast<int8_t>(fastf2i(clampf(val*128.0f, -128.0f, 127.0f))); }
+{ return static_cast<int8_t>(fastf2i(std::clamp(val*128.0f, -128.0f, 127.0f))); }
 
 /* Define unsigned output variations. */
 template<> inline uint32_t SampleConv(float val) noexcept
@@ -2155,7 +2130,7 @@ void Write(const al::span<const FloatBufferLine> InBuffer, void *OutBuffer, cons
 
 uint DeviceBase::renderSamples(const uint numSamples)
 {
-    const uint samplesToDo{minu(numSamples, BufferLineSize)};
+    const uint samplesToDo{std::min(numSamples, uint{BufferLineSize})};
 
     /* Clear main mixing buffers. */
     for(FloatBufferLine &buffer : MixBuffer)
@@ -2259,10 +2234,12 @@ void DeviceBase::handleDisconnect(const char *msg, ...)
         AsyncEvent evt{std::in_place_type<AsyncDisconnectEvent>};
         auto &disconnect = std::get<AsyncDisconnectEvent>(evt);
 
+        /* NOLINTBEGIN(*-array-to-pointer-decay) */
         va_list args;
         va_start(args, msg);
         int msglen{vsnprintf(disconnect.msg.data(), disconnect.msg.size(), msg, args)};
         va_end(args);
+        /* NOLINTEND(*-array-to-pointer-decay) */
 
         if(msglen < 0 || static_cast<size_t>(msglen) >= disconnect.msg.size())
             disconnect.msg[sizeof(disconnect.msg)-1] = 0;

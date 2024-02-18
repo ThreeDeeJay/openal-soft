@@ -5,14 +5,15 @@
 #include <bitset>
 #include <cstdint>
 #include <string_view>
+#include <utility>
 
 #include "AL/al.h"
+#include "AL/alc.h"
 #include "AL/efx.h"
 
-#include "al/effects/effects.h"
-#include "alc/effects/base.h"
 #include "almalloc.h"
 #include "alnumeric.h"
+#include "core/effects/base.h"
 
 
 enum {
@@ -60,7 +61,7 @@ struct ALeffect {
 
 void InitEffect(ALeffect *effect);
 
-void LoadReverbPreset(const char *name, ALeffect *effect);
+void LoadReverbPreset(const std::string_view name, ALeffect *effect);
 
 bool IsValidEffectType(ALenum type) noexcept;
 

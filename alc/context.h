@@ -20,6 +20,7 @@
 #include "al/listener.h"
 #include "almalloc.h"
 #include "alnumeric.h"
+#include "althreads.h"
 #include "atomic.h"
 #include "core/context.h"
 #include "inprogext.h"
@@ -80,7 +81,7 @@ struct ALCcontext : public al::intrusive_ref<ALCcontext>, ContextBase {
 
     std::mutex mPropLock;
 
-    std::atomic<ALenum> mLastError{AL_NO_ERROR};
+    al::tss<ALenum> mLastThreadError{AL_NO_ERROR};
 
     const ContextFlagBitset mContextFlags;
     std::atomic<bool> mDebugEnabled{false};
@@ -191,7 +192,14 @@ private:
     class ThreadCtx {
     public:
         ~ThreadCtx();
+        /* NOLINTBEGIN(readability-convert-member-functions-to-static)
+         * This should be non-static to invoke construction of the thread-local
+         * sThreadContext, so that it's destructor gets run at thread exit to
+         * clear sLocalContext (which isn't a member variable to make read
+         * access efficient).
+         */
         void set(ALCcontext *ctx) const noexcept { sLocalContext = ctx; }
+        /* NOLINTEND(readability-convert-member-functions-to-static) */
     };
     static thread_local ThreadCtx sThreadContext;
 
@@ -446,7 +454,7 @@ private:
         typename TMemberResult,
         typename TProps,
         typename TState>
-    void eax_defer(const EaxCall& call, TState& state, TMemberResult TProps::*member) noexcept
+    void eax_defer(const EaxCall& call, TState& state, TMemberResult TProps::*member)
     {
         const auto& src = call.get_value<ContextException, const TMemberResult>();
         TValidator{}(src);
@@ -529,7 +537,7 @@ private:
 
 using ContextRef = al::intrusive_ptr<ALCcontext>;
 
-ContextRef GetContextRef();
+ContextRef GetContextRef() noexcept;
 
 void UpdateContextProps(ALCcontext *context);
 
@@ -538,19 +546,16 @@ extern bool TrapALError;
 
 
 #ifdef ALSOFT_EAX
-ALenum AL_APIENTRY EAXSet(
-    const GUID* property_set_id,
-    ALuint property_id,
-    ALuint property_source_id,
-    ALvoid* property_value,
-    ALuint property_value_size) noexcept;
+/* NOLINTBEGIN(readability-inconsistent-declaration-parameter-name)
+ * These functions are defined using macros to forward them in a generic way to
+ * implementation functions, which gives the parameters generic names.
+ */
+ALenum AL_APIENTRY EAXSet(const GUID *property_set_id, ALuint property_id,
+    ALuint property_source_id, ALvoid *property_value, ALuint property_value_size) noexcept;
 
-ALenum AL_APIENTRY EAXGet(
-    const GUID* property_set_id,
-    ALuint property_id,
-    ALuint property_source_id,
-    ALvoid* property_value,
-    ALuint property_value_size) noexcept;
+ALenum AL_APIENTRY EAXGet(const GUID *property_set_id, ALuint property_id,
+    ALuint property_source_id, ALvoid *property_value, ALuint property_value_size) noexcept;
+/* NOLINTEND(readability-inconsistent-declaration-parameter-name) */
 #endif // ALSOFT_EAX
 
 #endif /* ALC_CONTEXT_H */
