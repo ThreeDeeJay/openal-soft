@@ -73,36 +73,29 @@ namespace {
 
 using SubListAllocator = al::allocator<std::array<ALeffectslot,64>>;
 
-struct FactoryItem {
-    EffectSlotType Type;
-    EffectStateFactory* (&GetFactory)();
-};
-constexpr std::array FactoryList{
-    FactoryItem{EffectSlotType::None, NullStateFactory_getFactory},
-    FactoryItem{EffectSlotType::EAXReverb, ReverbStateFactory_getFactory},
-    FactoryItem{EffectSlotType::Reverb, StdReverbStateFactory_getFactory},
-    FactoryItem{EffectSlotType::Autowah, AutowahStateFactory_getFactory},
-    FactoryItem{EffectSlotType::Chorus, ChorusStateFactory_getFactory},
-    FactoryItem{EffectSlotType::Compressor, CompressorStateFactory_getFactory},
-    FactoryItem{EffectSlotType::Distortion, DistortionStateFactory_getFactory},
-    FactoryItem{EffectSlotType::Echo, EchoStateFactory_getFactory},
-    FactoryItem{EffectSlotType::Equalizer, EqualizerStateFactory_getFactory},
-    FactoryItem{EffectSlotType::Flanger, FlangerStateFactory_getFactory},
-    FactoryItem{EffectSlotType::FrequencyShifter, FshifterStateFactory_getFactory},
-    FactoryItem{EffectSlotType::RingModulator, ModulatorStateFactory_getFactory},
-    FactoryItem{EffectSlotType::PitchShifter, PshifterStateFactory_getFactory},
-    FactoryItem{EffectSlotType::VocalMorpher, VmorpherStateFactory_getFactory},
-    FactoryItem{EffectSlotType::DedicatedDialog, DedicatedDialogStateFactory_getFactory},
-    FactoryItem{EffectSlotType::DedicatedLFE, DedicatedLfeStateFactory_getFactory},
-    FactoryItem{EffectSlotType::Convolution, ConvolutionStateFactory_getFactory},
-};
-
 EffectStateFactory *getFactoryByType(EffectSlotType type)
 {
-    auto iter = std::find_if(FactoryList.begin(), FactoryList.end(),
-        [type](const FactoryItem &item) noexcept -> bool
-        { return item.Type == type; });
-    return (iter != std::end(FactoryList)) ? iter->GetFactory() : nullptr;
+    switch(type)
+    {
+    case EffectSlotType::None: return NullStateFactory_getFactory();
+    case EffectSlotType::EAXReverb: return ReverbStateFactory_getFactory();
+    case EffectSlotType::Reverb: return StdReverbStateFactory_getFactory();
+    case EffectSlotType::Autowah: return AutowahStateFactory_getFactory();
+    case EffectSlotType::Chorus: return ChorusStateFactory_getFactory();
+    case EffectSlotType::Compressor: return CompressorStateFactory_getFactory();
+    case EffectSlotType::Distortion: return DistortionStateFactory_getFactory();
+    case EffectSlotType::Echo: return EchoStateFactory_getFactory();
+    case EffectSlotType::Equalizer: return EqualizerStateFactory_getFactory();
+    case EffectSlotType::Flanger: return FlangerStateFactory_getFactory();
+    case EffectSlotType::FrequencyShifter: return FshifterStateFactory_getFactory();
+    case EffectSlotType::RingModulator: return ModulatorStateFactory_getFactory();
+    case EffectSlotType::PitchShifter: return PshifterStateFactory_getFactory();
+    case EffectSlotType::VocalMorpher: return VmorpherStateFactory_getFactory();
+    case EffectSlotType::DedicatedDialog: return DedicatedDialogStateFactory_getFactory();
+    case EffectSlotType::DedicatedLFE: return DedicatedLfeStateFactory_getFactory();
+    case EffectSlotType::Convolution: return ConvolutionStateFactory_getFactory();
+    }
+    return nullptr;
 }
 
 
@@ -327,7 +320,7 @@ inline void UpdateProps(ALeffectslot *slot, ALCcontext *context)
 } // namespace
 
 
-AL_API DECL_FUNC2(void, alGenAuxiliaryEffectSlots, ALsizei, ALuint*)
+AL_API DECL_FUNC2(void, alGenAuxiliaryEffectSlots, ALsizei,n, ALuint*,effectslots)
 FORCE_ALIGN void AL_APIENTRY alGenAuxiliaryEffectSlotsDirect(ALCcontext *context, ALsizei n,
     ALuint *effectslots) noexcept
 {
@@ -369,7 +362,7 @@ FORCE_ALIGN void AL_APIENTRY alGenAuxiliaryEffectSlotsDirect(ALCcontext *context
     }
 }
 
-AL_API DECL_FUNC2(void, alDeleteAuxiliaryEffectSlots, ALsizei, const ALuint*)
+AL_API DECL_FUNC2(void, alDeleteAuxiliaryEffectSlots, ALsizei,n, const ALuint*,effectslots)
 FORCE_ALIGN void AL_APIENTRY alDeleteAuxiliaryEffectSlotsDirect(ALCcontext *context, ALsizei n,
     const ALuint *effectslots) noexcept
 {
@@ -426,7 +419,7 @@ FORCE_ALIGN void AL_APIENTRY alDeleteAuxiliaryEffectSlotsDirect(ALCcontext *cont
     }
 }
 
-AL_API DECL_FUNC1(ALboolean, alIsAuxiliaryEffectSlot, ALuint)
+AL_API DECL_FUNC1(ALboolean, alIsAuxiliaryEffectSlot, ALuint,effectslot)
 FORCE_ALIGN ALboolean AL_APIENTRY alIsAuxiliaryEffectSlotDirect(ALCcontext *context,
     ALuint effectslot) noexcept
 {
@@ -538,7 +531,7 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSlotStopvSOFT(ALsizei n, const ALuint *
 }
 
 
-AL_API DECL_FUNC3(void, alAuxiliaryEffectSloti, ALuint, ALenum, ALint)
+AL_API DECL_FUNC3(void, alAuxiliaryEffectSloti, ALuint,effectslot, ALenum,param, ALint,value)
 FORCE_ALIGN void AL_APIENTRY alAuxiliaryEffectSlotiDirect(ALCcontext *context, ALuint effectslot,
     ALenum param, ALint value) noexcept
 {
@@ -675,7 +668,7 @@ FORCE_ALIGN void AL_APIENTRY alAuxiliaryEffectSlotiDirect(ALCcontext *context, A
     UpdateProps(slot, context);
 }
 
-AL_API DECL_FUNC3(void, alAuxiliaryEffectSlotiv, ALuint, ALenum, const ALint*)
+AL_API DECL_FUNC3(void, alAuxiliaryEffectSlotiv, ALuint,effectslot, ALenum,param, const ALint*,values)
 FORCE_ALIGN void AL_APIENTRY alAuxiliaryEffectSlotivDirect(ALCcontext *context, ALuint effectslot,
     ALenum param, const ALint *values) noexcept
 {
@@ -703,7 +696,7 @@ FORCE_ALIGN void AL_APIENTRY alAuxiliaryEffectSlotivDirect(ALCcontext *context, 
     }
 }
 
-AL_API DECL_FUNC3(void, alAuxiliaryEffectSlotf, ALuint, ALenum, ALfloat)
+AL_API DECL_FUNC3(void, alAuxiliaryEffectSlotf, ALuint,effectslot, ALenum,param, ALfloat,value)
 FORCE_ALIGN void AL_APIENTRY alAuxiliaryEffectSlotfDirect(ALCcontext *context, ALuint effectslot,
     ALenum param, ALfloat value) noexcept
 {
@@ -730,7 +723,7 @@ FORCE_ALIGN void AL_APIENTRY alAuxiliaryEffectSlotfDirect(ALCcontext *context, A
     UpdateProps(slot, context);
 }
 
-AL_API DECL_FUNC3(void, alAuxiliaryEffectSlotfv, ALuint, ALenum, const ALfloat*)
+AL_API DECL_FUNC3(void, alAuxiliaryEffectSlotfv, ALuint,effectslot, ALenum,param, const ALfloat*,values)
 FORCE_ALIGN void AL_APIENTRY alAuxiliaryEffectSlotfvDirect(ALCcontext *context, ALuint effectslot,
     ALenum param, const ALfloat *values) noexcept
 {
@@ -755,7 +748,7 @@ FORCE_ALIGN void AL_APIENTRY alAuxiliaryEffectSlotfvDirect(ALCcontext *context, 
 }
 
 
-AL_API DECL_FUNC3(void, alGetAuxiliaryEffectSloti, ALuint, ALenum, ALint*)
+AL_API DECL_FUNC3(void, alGetAuxiliaryEffectSloti, ALuint,effectslot, ALenum,param, ALint*,value)
 FORCE_ALIGN void AL_APIENTRY alGetAuxiliaryEffectSlotiDirect(ALCcontext *context,
     ALuint effectslot, ALenum param, ALint *value) noexcept
 {
@@ -797,7 +790,7 @@ FORCE_ALIGN void AL_APIENTRY alGetAuxiliaryEffectSlotiDirect(ALCcontext *context
     }
 }
 
-AL_API DECL_FUNC3(void, alGetAuxiliaryEffectSlotiv, ALuint, ALenum, ALint*)
+AL_API DECL_FUNC3(void, alGetAuxiliaryEffectSlotiv, ALuint,effectslot, ALenum,param, ALint*,values)
 FORCE_ALIGN void AL_APIENTRY alGetAuxiliaryEffectSlotivDirect(ALCcontext *context,
     ALuint effectslot, ALenum param, ALint *values) noexcept
 {
@@ -825,7 +818,7 @@ FORCE_ALIGN void AL_APIENTRY alGetAuxiliaryEffectSlotivDirect(ALCcontext *contex
     }
 }
 
-AL_API DECL_FUNC3(void, alGetAuxiliaryEffectSlotf, ALuint, ALenum, ALfloat*)
+AL_API DECL_FUNC3(void, alGetAuxiliaryEffectSlotf, ALuint,effectslot, ALenum,param, ALfloat*,value)
 FORCE_ALIGN void AL_APIENTRY alGetAuxiliaryEffectSlotfDirect(ALCcontext *context,
     ALuint effectslot, ALenum param, ALfloat *value) noexcept
 {
@@ -845,7 +838,7 @@ FORCE_ALIGN void AL_APIENTRY alGetAuxiliaryEffectSlotfDirect(ALCcontext *context
     }
 }
 
-AL_API DECL_FUNC3(void, alGetAuxiliaryEffectSlotfv, ALuint, ALenum, ALfloat*)
+AL_API DECL_FUNC3(void, alGetAuxiliaryEffectSlotfv, ALuint,effectslot, ALenum,param, ALfloat*,values)
 FORCE_ALIGN void AL_APIENTRY alGetAuxiliaryEffectSlotfvDirect(ALCcontext *context,
     ALuint effectslot, ALenum param, ALfloat *values) noexcept
 {

@@ -169,12 +169,12 @@ void Resample_<CubicTag,SSETag>(const InterpState *state, const float *src, uint
 {
     ASSUME(frac < MixerFracOne);
 
-    const auto *filter = al::assume_aligned<16>(std::get<CubicState>(*state).filter);
+    const auto filter = std::get<CubicState>(*state).filter;
 
     src -= 1;
     std::generate(dst.begin(), dst.end(), [&src,&frac,increment,filter]() -> float
     {
-        const uint pi{frac >> CubicPhaseDiffBits};
+        const uint pi{frac >> CubicPhaseDiffBits}; ASSUME(pi < CubicPhaseCount);
         const float pf{static_cast<float>(frac&CubicPhaseDiffMask) * (1.0f/CubicPhaseDiffOne)};
         const __m128 pf4{_mm_set1_ps(pf)};
 
@@ -309,7 +309,8 @@ void MixHrtfBlend_<SSETag>(const float *InSamples, float2 *AccumSamples, const u
 template<>
 void MixDirectHrtf_<SSETag>(const FloatBufferSpan LeftOut, const FloatBufferSpan RightOut,
     const al::span<const FloatBufferLine> InSamples, float2 *AccumSamples,
-    float *TempBuf, HrtfChannelState *ChanState, const size_t IrSize, const size_t BufferSize)
+    const al::span<float,BufferLineSize> TempBuf, HrtfChannelState *ChanState, const size_t IrSize,
+    const size_t BufferSize)
 {
     MixDirectHrtfBase<ApplyCoeffs>(LeftOut, RightOut, InSamples, AccumSamples, TempBuf, ChanState,
         IrSize, BufferSize);

@@ -88,6 +88,7 @@ struct ALsource {
     DirectMode DirectChannels{DirectMode::Off};
     SpatializeMode mSpatialize{SpatializeMode::Auto};
     SourceStereo mStereoMode{SourceStereo::Normal};
+    bool mPanningEnabled{false};
 
     bool DryGainHFAuto{true};
     bool WetGainAuto{true};
@@ -105,15 +106,18 @@ struct ALsource {
 
     float Radius{0.0f};
     float EnhWidth{0.593f};
+    float mPan{0.0f};
 
     /** Direct filter and auxiliary send info. */
-    struct {
+    struct DirectData {
         float Gain{};
         float GainHF{};
         float HFReference{};
         float GainLF{};
         float LFReference{};
-    } Direct;
+    };
+    DirectData Direct;
+
     struct SendData {
         ALeffectslot *Slot{};
         float Gain{};

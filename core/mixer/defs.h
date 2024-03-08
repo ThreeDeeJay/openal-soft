@@ -4,13 +4,13 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <utility>
 #include <variant>
 
 #include "alspan.h"
 #include "core/bufferline.h"
-#include "core/resampler_limits.h"
+#include "core/cubic_defs.h"
 
-struct CubicCoefficients;
 struct HrtfChannelState;
 struct HrtfFilter;
 struct MixHrtfFilter;
@@ -58,10 +58,11 @@ struct CubicState {
     /* Filter coefficients, and coefficient deltas. Starting at phase index 0,
      * each subsequent phase index follows contiguously.
      */
-    const CubicCoefficients *filter;
+    al::span<const CubicCoefficients,CubicPhaseCount> filter;
+    CubicState(al::span<const CubicCoefficients,CubicPhaseCount> f) : filter{f} { }
 };
 
-using InterpState = std::variant<CubicState,BsincState>;
+using InterpState = std::variant<std::monostate,CubicState,BsincState>;
 
 using ResamplerFunc = void(*)(const InterpState *state, const float *src, uint frac,
     const uint increment, const al::span<float> dst);
@@ -89,7 +90,8 @@ void MixHrtfBlend_(const float *InSamples, float2 *AccumSamples, const uint IrSi
 template<typename InstTag>
 void MixDirectHrtf_(const FloatBufferSpan LeftOut, const FloatBufferSpan RightOut,
     const al::span<const FloatBufferLine> InSamples, float2 *AccumSamples,
-    float *TempBuf, HrtfChannelState *ChanState, const size_t IrSize, const size_t BufferSize);
+    const al::span<float,BufferLineSize> TempBuf, HrtfChannelState *ChanState, const size_t IrSize,
+    const size_t BufferSize);
 
 /* Vectorized resampler helpers */
 template<size_t N>

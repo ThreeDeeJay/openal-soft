@@ -394,7 +394,7 @@ struct T60Filter {
 
     /* Applies the two T60 damping filter sections. */
     void process(const al::span<float> samples)
-    { DualBiquad{HFFilter, LFFilter}.process(samples, samples.data()); }
+    { DualBiquad{HFFilter, LFFilter}.process(samples, samples); }
 
     void clear() noexcept { HFFilter.clear(); LFFilter.clear(); }
 };
@@ -540,7 +540,7 @@ struct ReverbState final : public EffectState {
      */
     al::vector<float,16> mSampleBuffer;
 
-    struct {
+    struct Params {
         /* Calculated parameters which indicate if cross-fading is needed after
          * an update.
          */
@@ -553,7 +553,8 @@ struct ReverbState final : public EffectState {
         float ModulationDepth{0.0f};
         float HFReference{5000.0f};
         float LFReference{250.0f};
-    } mParams;
+    };
+    Params mParams;
 
     enum PipelineState : uint8_t {
         DeviceClear,
@@ -1552,7 +1553,7 @@ void ReverbPipeline::processEarly(const DelayLineU &main_delay, size_t offset,
 
             /* Band-pass the incoming samples. */
             auto&& filter = DualBiquad{mFilter[j].Lp, mFilter[j].Hp};
-            filter.process({tempSamples[j].data(), todo}, tempSamples[j].data());
+            filter.process({tempSamples[j].cbegin(), todo}, tempSamples[j]);
         }
 
         /* Apply an all-pass, to help color the initial reflections. */

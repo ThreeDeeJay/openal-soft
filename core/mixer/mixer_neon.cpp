@@ -66,12 +66,12 @@ inline float32x4_t set_f4(float l0, float l1, float l2, float l3)
 inline void ApplyCoeffs(float2 *RESTRICT Values, const size_t IrSize, const ConstHrirSpan Coeffs,
     const float left, const float right)
 {
-    float32x4_t leftright4;
+    auto dup_samples = [left,right]
     {
-        float32x2_t leftright2{vmov_n_f32(left)};
-        leftright2 = vset_lane_f32(right, leftright2, 1);
-        leftright4 = vcombine_f32(leftright2, leftright2);
-    }
+        float32x2_t leftright2{vset_lane_f32(right, vmov_n_f32(left), 1)};
+        return vcombine_f32(leftright2, leftright2);
+    };
+    const float32x4_t leftright4{dup_samples()};
 
     ASSUME(IrSize >= MinIrLength);
     for(size_t c{0};c < IrSize;c += 2)
@@ -218,7 +218,7 @@ void Resample_<CubicTag,NEONTag>(const InterpState *state, const float *src, uin
 {
     ASSUME(frac < MixerFracOne);
 
-    const auto *filter = al::assume_aligned<16>(std::get<CubicState>(*state).filter);
+    const auto filter = std::get<CubicState>(*state).filter;
 
     const uint32x4_t increment4{vdupq_n_u32(increment*4u)};
     const uint32x4_t fracMask4{vdupq_n_u32(MixerFracMask)};
@@ -244,10 +244,10 @@ void Resample_<CubicTag,NEONTag>(const InterpState *state, const float *src, uin
         const float32x4_t val3{vld1q_f32(src+pos3)};
 
         const uint32x4_t pi4{vshrq_n_u32(frac4, CubicPhaseDiffBits)};
-        const uint pi0{vgetq_lane_u32(pi4, 0)};
-        const uint pi1{vgetq_lane_u32(pi4, 1)};
-        const uint pi2{vgetq_lane_u32(pi4, 2)};
-        const uint pi3{vgetq_lane_u32(pi4, 3)};
+        const uint pi0{vgetq_lane_u32(pi4, 0)}; ASSUME(pi0 < CubicPhaseCount);
+        const uint pi1{vgetq_lane_u32(pi4, 1)}; ASSUME(pi1 < CubicPhaseCount);
+        const uint pi2{vgetq_lane_u32(pi4, 2)}; ASSUME(pi2 < CubicPhaseCount);
+        const uint pi3{vgetq_lane_u32(pi4, 3)}; ASSUME(pi3 < CubicPhaseCount);
 
         const float32x4_t pf4{vmulq_f32(vcvtq_f32_u32(vandq_u32(frac4, fracDiffMask4)),
             fracDiffOne4)};
@@ -281,7 +281,7 @@ void Resample_<CubicTag,NEONTag>(const InterpState *state, const float *src, uin
 
         std::generate(dst.end()-todo, dst.end(), [&src,&frac,increment,filter]() -> float
         {
-            const uint pi{frac >> CubicPhaseDiffBits};
+            const uint pi{frac >> CubicPhaseDiffBits}; ASSUME(pi < CubicPhaseCount);
             const float pf{static_cast<float>(frac&CubicPhaseDiffMask) * (1.0f/CubicPhaseDiffOne)};
             const float32x4_t pf4{vdupq_n_f32(pf)};
 
@@ -410,7 +410,8 @@ void MixHrtfBlend_<NEONTag>(const float *InSamples, float2 *AccumSamples, const 
 template<>
 void MixDirectHrtf_<NEONTag>(const FloatBufferSpan LeftOut, const FloatBufferSpan RightOut,
     const al::span<const FloatBufferLine> InSamples, float2 *AccumSamples,
-    float *TempBuf, HrtfChannelState *ChanState, const size_t IrSize, const size_t BufferSize)
+    const al::span<float,BufferLineSize> TempBuf, HrtfChannelState *ChanState, const size_t IrSize,
+    const size_t BufferSize)
 {
     MixDirectHrtfBase<ApplyCoeffs>(LeftOut, RightOut, InSamples, AccumSamples, TempBuf, ChanState,
         IrSize, BufferSize);

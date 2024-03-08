@@ -231,8 +231,7 @@ struct DeviceBase {
     /* Temp storage used for mixer processing. */
     static constexpr size_t MixerLineSize{BufferLineSize + DecoderBase::sMaxPadding};
     static constexpr size_t MixerChannelsMax{16};
-    using MixerBufferLine = std::array<float,MixerLineSize>;
-    alignas(16) std::array<MixerBufferLine,MixerChannelsMax> mSampleData{};
+    alignas(16) std::array<float,MixerLineSize*MixerChannelsMax> mSampleData{};
     alignas(16) std::array<float,MixerLineSize+MaxResamplerPadding> mResampleData{};
 
     alignas(16) std::array<float,BufferLineSize> FilteredData{};
@@ -300,26 +299,25 @@ struct DeviceBase {
     [[nodiscard]] auto frameSizeFromFmt() const noexcept -> uint { return bytesFromFmt() * channelsFromFmt(); }
 
     struct MixLock {
-        std::atomic<uint> &mCount;
-        const uint mLastVal;
+        DeviceBase *const self;
+        const uint mEndVal;
 
-        MixLock(std::atomic<uint> &count, const uint last_val) noexcept
-            : mCount{count}, mLastVal{last_val}
-        { }
-        /* Increment the mix count when the lock goes out of scope to "release"
-         * it (lsb should be 0).
+        MixLock(DeviceBase *device, const uint endval) noexcept : self{device}, mEndVal{endval} { }
+        MixLock(const MixLock&) = delete;
+        void operator=(const MixLock&) = delete;
+        /* Update the mix count when the lock goes out of scope to "release" it
+         * (lsb should be 0).
          */
-        ~MixLock() { mCount.store(mLastVal+2, std::memory_order_release); }
+        ~MixLock() { self->mMixCount.store(mEndVal, std::memory_order_release); }
     };
-    auto getWriteMixLock() noexcept
+    auto getWriteMixLock() noexcept -> MixLock
     {
         /* Increment the mix count at the start of mixing and writing clock
          * info (lsb should be 1).
          */
-        const auto mixCount = mMixCount.load(std::memory_order_relaxed);
-        mMixCount.store(mixCount+1, std::memory_order_relaxed);
-        std::atomic_thread_fence(std::memory_order_release);
-        return MixLock{mMixCount, mixCount};
+        auto mixCount = mMixCount.load(std::memory_order_relaxed);
+        mMixCount.store(++mixCount, std::memory_order_release);
+        return MixLock{this, ++mixCount};
     }
 
     /** Waits for the mixer to not be mixing or updating the clock. */
