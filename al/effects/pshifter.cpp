@@ -9,6 +9,7 @@
 
 #ifdef ALSOFT_EAX
 #include "alnumeric.h"
+#include "al/eax/effect.h"
 #include "al/eax/exception.h"
 #include "al/eax/utils.h"
 #endif // ALSOFT_EAX
@@ -20,7 +21,7 @@ constexpr EffectProps genDefaultProps() noexcept
 {
     PshifterProps props{};
     props.CoarseTune = AL_PITCH_SHIFTER_DEFAULT_COARSE_TUNE;
-    props.FineTune   = AL_PITCH_SHIFTER_DEFAULT_FINE_TUNE;
+    props.FineTune = AL_PITCH_SHIFTER_DEFAULT_FINE_TUNE;
     return props;
 }
 
@@ -28,7 +29,7 @@ constexpr EffectProps genDefaultProps() noexcept
 
 const EffectProps PshifterEffectProps{genDefaultProps()};
 
-void EffectHandler::SetParami(PshifterProps &props, ALenum param, int val)
+void PshifterEffectHandler::SetParami(PshifterProps &props, ALenum param, int val)
 {
     switch(param)
     {
@@ -49,18 +50,18 @@ void EffectHandler::SetParami(PshifterProps &props, ALenum param, int val)
             param};
     }
 }
-void EffectHandler::SetParamiv(PshifterProps &props, ALenum param, const int *vals)
-{ SetParami(props, param, vals[0]); }
+void PshifterEffectHandler::SetParamiv(PshifterProps &props, ALenum param, const int *vals)
+{ SetParami(props, param, *vals); }
 
-void EffectHandler::SetParamf(PshifterProps&, ALenum param, float)
+void PshifterEffectHandler::SetParamf(PshifterProps&, ALenum param, float)
 { throw effect_exception{AL_INVALID_ENUM, "Invalid pitch shifter float property 0x%04x", param}; }
-void EffectHandler::SetParamfv(PshifterProps&, ALenum param, const float*)
+void PshifterEffectHandler::SetParamfv(PshifterProps&, ALenum param, const float*)
 {
     throw effect_exception{AL_INVALID_ENUM, "Invalid pitch shifter float-vector property 0x%04x",
         param};
 }
 
-void EffectHandler::GetParami(const PshifterProps &props, ALenum param, int *val)
+void PshifterEffectHandler::GetParami(const PshifterProps &props, ALenum param, int *val)
 {
     switch(param)
     {
@@ -72,12 +73,12 @@ void EffectHandler::GetParami(const PshifterProps &props, ALenum param, int *val
             param};
     }
 }
-void EffectHandler::GetParamiv(const PshifterProps &props, ALenum param, int *vals)
+void PshifterEffectHandler::GetParamiv(const PshifterProps &props, ALenum param, int *vals)
 { GetParami(props, param, vals); }
 
-void EffectHandler::GetParamf(const PshifterProps&, ALenum param, float*)
+void PshifterEffectHandler::GetParamf(const PshifterProps&, ALenum param, float*)
 { throw effect_exception{AL_INVALID_ENUM, "Invalid pitch shifter float property 0x%04x", param}; }
-void EffectHandler::GetParamfv(const PshifterProps&, ALenum param, float*)
+void PshifterEffectHandler::GetParamfv(const PshifterProps&, ALenum param, float*)
 {
     throw effect_exception{AL_INVALID_ENUM, "Invalid pitch shifter float vector-property 0x%04x",
         param};

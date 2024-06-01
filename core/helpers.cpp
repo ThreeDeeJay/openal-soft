@@ -37,10 +37,13 @@ void DirectorySearch(const std::filesystem::path &path, const std::string_view e
 {
     namespace fs = std::filesystem;
 
-    const auto base = static_cast<std::make_signed_t<size_t>>(results->size());
+    const auto base = results->size();
 
     try {
-        auto fpath = fs::canonical(path.lexically_normal());
+        auto fpath = path.lexically_normal();
+        if(!fs::exists(fpath))
+            return;
+
         TRACE("Searching %s for *%.*s\n", fpath.u8string().c_str(), al::sizei(ext), ext.data());
         for(auto&& dirent : fs::directory_iterator{fpath})
         {
@@ -53,15 +56,11 @@ void DirectorySearch(const std::filesystem::path &path, const std::string_view e
                 results->emplace_back(entrypath.u8string());
         }
     }
-    catch(fs::filesystem_error& fe) {
-        if(fe.code() != std::make_error_code(std::errc::no_such_file_or_directory))
-            ERR("Error enumerating directory: %s\n", fe.what());
-    }
     catch(std::exception& e) {
         ERR("Exception enumerating files: %s\n", e.what());
     }
 
-    const al::span newlist{results->begin()+base, results->end()};
+    const auto newlist = al::span{*results}.subspan(base);
     std::sort(newlist.begin(), newlist.end());
     for(const auto &name : newlist)
         TRACE(" got %s\n", name.c_str());
@@ -79,12 +78,20 @@ const PathNamePair &GetProcBinary()
     auto get_procbin = []
     {
 #if !defined(ALSOFT_UWP)
-        auto fullpath = std::vector<WCHAR>(256);
-        DWORD len{GetModuleFileNameW(nullptr, fullpath.data(), static_cast<DWORD>(fullpath.size()))};
+        DWORD pathlen{256};
+        auto fullpath = std::wstring(pathlen, L'\0');
+        DWORD len{GetModuleFileNameW(nullptr, fullpath.data(), pathlen)};
         while(len == fullpath.size())
         {
-            fullpath.resize(fullpath.size() << 1);
-            len = GetModuleFileNameW(nullptr, fullpath.data(), static_cast<DWORD>(fullpath.size()));
+            pathlen <<= 1;
+            if(pathlen == 0)
+            {
+                /* pathlen overflow (more than 4 billion characters??) */
+                len = 0;
+                break;
+            }
+            fullpath.resize(pathlen);
+            len = GetModuleFileNameW(nullptr, fullpath.data(), pathlen);
         }
         if(len == 0)
         {
@@ -93,8 +100,6 @@ const PathNamePair &GetProcBinary()
         }
 
         fullpath.resize(len);
-        if(fullpath.back() != 0)
-            fullpath.push_back(0);
 #else
         const WCHAR *exePath{__wargv[0]};
         if(!exePath)
@@ -102,20 +107,18 @@ const PathNamePair &GetProcBinary()
             ERR("Failed to get process name: __wargv[0] == nullptr\n");
             return PathNamePair{};
         }
-        std::vector<WCHAR> fullpath{exePath, exePath + wcslen(exePath) + 1};
+        std::wstring fullpath{exePath};
 #endif
-        std::replace(fullpath.begin(), fullpath.end(), '/', '\\');
+        std::replace(fullpath.begin(), fullpath.end(), L'/', L'\\');
 
         PathNamePair res{};
-        auto sep = std::find(fullpath.rbegin()+1, fullpath.rend(), '\\');
-        if(sep != fullpath.rend())
+        if(auto seppos = fullpath.rfind(L'\\'); seppos < fullpath.size())
         {
-            *sep = 0;
-            res.path = wstr_to_utf8(fullpath.data());
-            res.fname = wstr_to_utf8(al::to_address(sep.base()));
+            res.path = wstr_to_utf8(std::wstring_view{fullpath}.substr(0, seppos));
+            res.fname = wstr_to_utf8(std::wstring_view{fullpath}.substr(seppos+1));
         }
         else
-            res.fname = wstr_to_utf8(fullpath.data());
+            res.fname = wstr_to_utf8(fullpath);
 
         TRACE("Got binary: %s, %s\n", res.path.c_str(), res.fname.c_str());
         return res;
@@ -260,19 +263,16 @@ const PathNamePair &GetProcBinary()
             for(const std::string_view name : SelfLinkNames)
             {
                 try {
+                    if(!std::filesystem::exists(name))
+                        continue;
                     if(auto path = std::filesystem::read_symlink(name); !path.empty())
                     {
                         pathname = path.u8string();
                         break;
                     }
                 }
-                catch(std::filesystem::filesystem_error& fe) {
-                    if(fe.code() != std::make_error_code(std::errc::no_such_file_or_directory))
-                        WARN("Failed to read_symlink %.*s: %s\n", al::sizei(name), name.data(),
-                            fe.what());
-                }
                 catch(std::exception& e) {
-                    WARN("Failed to read_symlink %.*s: %s\n", al::sizei(name), name.data(),
+                    WARN("Exception getting symlink %.*s: %s\n", al::sizei(name), name.data(),
                         e.what());
                 }
             }

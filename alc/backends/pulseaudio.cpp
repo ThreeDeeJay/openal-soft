@@ -597,6 +597,8 @@ void PulseMainloop::probePlaybackDevices()
     PlaybackDevices.clear();
     try {
         MainloopUniqueLock plock{*this};
+        plock.connectContext();
+
         auto sink_callback = [](pa_context *ctx, const pa_sink_info *info, int eol, void *pdata) noexcept
         { return static_cast<PulseMainloop*>(pdata)->deviceSinkCallback(ctx, info, eol); };
 
@@ -616,6 +618,8 @@ void PulseMainloop::probeCaptureDevices()
     CaptureDevices.clear();
     try {
         MainloopUniqueLock plock{*this};
+        plock.connectContext();
+
         auto src_callback = [](pa_context *ctx, const pa_source_info *info, int eol, void *pdata) noexcept
         { return static_cast<PulseMainloop*>(pdata)->deviceSourceCallback(ctx, info, eol); };
 
@@ -788,19 +792,20 @@ void PulsePlayback::open(std::string_view name)
             "Failed to start device mainloop"};
 
     const char *pulse_name{nullptr};
-    const char *dev_name{nullptr};
+    std::string_view display_name;
     if(!name.empty())
     {
         if(PlaybackDevices.empty())
             mMainloop.probePlaybackDevices();
 
-        auto iter = std::find_if(PlaybackDevices.cbegin(), PlaybackDevices.cend(),
-            [name](const DevMap &entry) -> bool { return entry.name == name; });
+        auto match_name = [name](const DevMap &entry) -> bool
+        { return entry.name == name || entry.device_name == name; };
+        auto iter = std::find_if(PlaybackDevices.cbegin(), PlaybackDevices.cend(), match_name);
         if(iter == PlaybackDevices.cend())
             throw al::backend_exception{al::backend_error::NoDevice,
                 "Device name \"%.*s\" not found", al::sizei(name), name.data()};
         pulse_name = iter->device_name.c_str();
-        dev_name = iter->name.c_str();
+        display_name = iter->name;
     }
 
     MainloopUniqueLock plock{mMainloop};
@@ -831,7 +836,7 @@ void PulsePlayback::open(std::string_view name)
 
     if(pulse_name) mDeviceName.emplace(pulse_name);
     else mDeviceName.reset();
-    if(!dev_name)
+    if(display_name.empty())
     {
         auto name_callback = [](pa_context *context, const pa_sink_info *info, int eol, void *pdata) noexcept
         { return static_cast<PulsePlayback*>(pdata)->sinkNameCallback(context, info, eol); };
@@ -840,7 +845,7 @@ void PulsePlayback::open(std::string_view name)
         plock.waitForOperation(op);
     }
     else
-        mDevice->DeviceName = dev_name;
+        mDevice->DeviceName = display_name;
 }
 
 bool PulsePlayback::reset()
@@ -1029,7 +1034,7 @@ void PulsePlayback::stop()
 
 ClockLatency PulsePlayback::getClockLatency()
 {
-    ClockLatency ret;
+    ClockLatency ret{};
     pa_usec_t latency{};
     int neg{}, err{};
 
@@ -1137,8 +1142,9 @@ void PulseCapture::open(std::string_view name)
         if(CaptureDevices.empty())
             mMainloop.probeCaptureDevices();
 
-        auto iter = std::find_if(CaptureDevices.cbegin(), CaptureDevices.cend(),
-            [name](const DevMap &entry) -> bool { return entry.name == name; });
+        auto match_name = [name](const DevMap &entry) -> bool
+        { return entry.name == name || entry.device_name == name; };
+        auto iter = std::find_if(CaptureDevices.cbegin(), CaptureDevices.cend(), match_name);
         if(iter == CaptureDevices.cend())
             throw al::backend_exception{al::backend_error::NoDevice,
                 "Device name \"%.*s\" not found", al::sizei(name), name.data()};
@@ -1357,7 +1363,7 @@ uint PulseCapture::availableSamples()
 
 ClockLatency PulseCapture::getClockLatency()
 {
-    ClockLatency ret;
+    ClockLatency ret{};
     pa_usec_t latency{};
     int neg{}, err{};
 
@@ -1448,27 +1454,24 @@ bool PulseBackendFactory::init()
 bool PulseBackendFactory::querySupport(BackendType type)
 { return type == BackendType::Playback || type == BackendType::Capture; }
 
-std::string PulseBackendFactory::probe(BackendType type)
+auto PulseBackendFactory::enumerate(BackendType type) -> std::vector<std::string>
 {
-    std::string outnames;
+    std::vector<std::string> outnames;
 
     auto add_device = [&outnames](const DevMap &entry) -> void
-    {
-        /* +1 to also append the null char (to ensure a null-separated list and
-         * double-null terminated list).
-         */
-        outnames.append(entry.name.c_str(), entry.name.length()+1);
-    };
+    { outnames.push_back(entry.name); };
 
     switch(type)
     {
     case BackendType::Playback:
         gGlobalMainloop.probePlaybackDevices();
+        outnames.reserve(PlaybackDevices.size());
         std::for_each(PlaybackDevices.cbegin(), PlaybackDevices.cend(), add_device);
         break;
 
     case BackendType::Capture:
         gGlobalMainloop.probeCaptureDevices();
+        outnames.reserve(CaptureDevices.size());
         std::for_each(CaptureDevices.cbegin(), CaptureDevices.cend(), add_device);
         break;
     }

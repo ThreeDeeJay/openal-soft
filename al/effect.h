@@ -5,14 +5,16 @@
 #include <bitset>
 #include <cstdint>
 #include <string_view>
+#include <utility>
 
 #include "AL/al.h"
+#include "AL/alc.h"
 #include "AL/efx.h"
 
-#include "al/effects/effects.h"
-#include "alc/effects/base.h"
 #include "almalloc.h"
 #include "alnumeric.h"
+#include "core/effects/base.h"
+#include "effects/effects.h"
 
 
 enum {
@@ -43,11 +45,17 @@ struct EffectList {
 };
 extern const std::array<EffectList,16> gEffectList;
 
+using EffectHandlerVariant = std::variant<NullEffectHandler,ReverbEffectHandler,
+    StdReverbEffectHandler,AutowahEffectHandler,ChorusEffectHandler,CompressorEffectHandler,
+    DistortionEffectHandler,EchoEffectHandler,EqualizerEffectHandler,FlangerEffectHandler,
+    FshifterEffectHandler,ModulatorEffectHandler,PshifterEffectHandler,VmorpherEffectHandler,
+    DedicatedDialogEffectHandler,DedicatedLfeEffectHandler,ConvolutionEffectHandler>;
 
 struct ALeffect {
     // Effect type (AL_EFFECT_NULL, ...)
     ALenum type{AL_EFFECT_NULL};
 
+    EffectHandlerVariant PropsVariant;
     EffectProps Props{};
 
     /* Self ID */

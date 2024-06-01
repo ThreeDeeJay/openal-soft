@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -24,7 +25,6 @@
 #include <vector>
 
 #include "albit.h"
-#include "alfstream.h"
 #include "almalloc.h"
 #include "alnumbers.h"
 #include "alnumeric.h"
@@ -120,6 +120,11 @@ std::mutex EnumeratedHrtfLock;
 std::vector<HrtfEntry> EnumeratedHrtfs;
 
 
+/* NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+ * To access a memory buffer through the std::istream interface, a custom
+ * std::streambuf implementation is needed that has to do pointer manipulation
+ * for seeking. With C++23, we may be able to use std::spanstream instead.
+ */
 class databuf final : public std::streambuf {
     int_type underflow() override
     { return traits_type::eof(); }
@@ -171,21 +176,18 @@ class databuf final : public std::streambuf {
     }
 
 public:
-    databuf(const char_type *start_, const char_type *end_) noexcept
+    databuf(const al::span<char_type> data) noexcept
     {
-        /* NOLINTBEGIN(*-const-cast) */
-        setg(const_cast<char_type*>(start_), const_cast<char_type*>(start_),
-            const_cast<char_type*>(end_));
-        /* NOLINTEND(*-const-cast) */
+        setg(data.data(), data.data(), al::to_address(data.end()));
     }
 };
+/* NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic) */
 
 class idstream final : public std::istream {
     databuf mStreamBuf;
 
 public:
-    idstream(const char *start_, const char *end_)
-      : std::istream{nullptr}, mStreamBuf{start_, end_}
+    idstream(const al::span<char_type> data) : std::istream{nullptr}, mStreamBuf{data}
     { init(&mStreamBuf); }
 };
 
@@ -222,7 +224,7 @@ IdxBlend CalcAzIndex(uint azcount, float az)
  * and azimuth in radians. The coefficients are normalized.
  */
 void HrtfStore::getCoeffs(float elevation, float azimuth, float distance, float spread,
-    HrirArray &coeffs, const al::span<uint,2> delays) const
+    const HrirSpan coeffs, const al::span<uint,2> delays) const
 {
     const float dirfact{1.0f - (al::numbers::inv_pi_v<float>/2.0f * spread)};
 
@@ -273,17 +275,17 @@ void HrtfStore::getCoeffs(float elevation, float azimuth, float distance, float 
     delays[1] = fastf2u(d * float{1.0f/HrirDelayFracOne});
 
     /* Calculate the blended HRIR coefficients. */
-    float *coeffout{al::assume_aligned<16>(coeffs[0].data())};
-    coeffout[0] = PassthruCoeff * (1.0f-dirfact);
-    coeffout[1] = PassthruCoeff * (1.0f-dirfact);
-    std::fill_n(coeffout+2, size_t{HrirLength-1}*2, 0.0f);
+    auto coeffout = coeffs.begin();
+    coeffout[0][0] = PassthruCoeff * (1.0f-dirfact);
+    coeffout[0][1] = PassthruCoeff * (1.0f-dirfact);
+    std::fill_n(coeffout+1, size_t{HrirLength-1}, std::array{0.0f, 0.0f});
     for(size_t c{0};c < 4;c++)
     {
-        const float *srccoeffs{al::assume_aligned<16>(mCoeffs[idx[c]][0].data())};
         const float mult{blend[c]};
-        auto blend_coeffs = [mult](const float src, const float coeff) noexcept -> float
-        { return src*mult + coeff; };
-        std::transform(srccoeffs, srccoeffs + HrirLength*2_uz, coeffout, coeffout, blend_coeffs);
+        auto blend_coeffs = [mult](const float2 &src, const float2 &coeff) noexcept -> float2
+        { return float2{{src[0]*mult + coeff[0], src[1]*mult + coeff[1]}}; };
+        std::transform(mCoeffs[idx[c]].cbegin(), mCoeffs[idx[c]].cend(), coeffout, coeffout,
+            blend_coeffs);
     }
 }
 
@@ -424,35 +426,38 @@ std::unique_ptr<HrtfStore> CreateHrtfStore(uint rate, uint8_t irSize,
     Hrtf->mIrSize = irSize;
 
     /* Set up pointers to storage following the main HRTF struct. */
-    char *base = reinterpret_cast<char*>(Hrtf.get());
-    size_t offset{sizeof(HrtfStore)};
+    auto storage = al::span{reinterpret_cast<char*>(Hrtf.get()), total};
+    auto base = storage.begin();
+    ptrdiff_t offset{sizeof(HrtfStore)};
 
     offset = RoundUp(offset, alignof(HrtfStore::Field)); /* Align for field infos */
-    auto field_ = reinterpret_cast<HrtfStore::Field*>(base + offset);
-    offset += sizeof(field_[0])*fields.size();
+    auto field_ = al::span{reinterpret_cast<HrtfStore::Field*>(al::to_address(base + offset)),
+        fields.size()};
+    offset += ptrdiff_t(sizeof(field_[0])*fields.size());
 
     offset = RoundUp(offset, alignof(HrtfStore::Elevation)); /* Align for elevation infos */
-    auto elev_ = reinterpret_cast<HrtfStore::Elevation*>(base + offset);
-    offset += sizeof(elev_[0])*elevs.size();
+    auto elev_ = al::span{reinterpret_cast<HrtfStore::Elevation*>(al::to_address(base + offset)),
+        elevs.size()};
+    offset += ptrdiff_t(sizeof(elev_[0])*elevs.size());
 
     offset = RoundUp(offset, 16); /* Align for coefficients using SIMD */
-    auto coeffs_ = reinterpret_cast<HrirArray*>(base + offset);
-    offset += sizeof(coeffs_[0])*irCount;
+    auto coeffs_ = al::span{reinterpret_cast<HrirArray*>(al::to_address(base + offset)), irCount};
+    offset += ptrdiff_t(sizeof(coeffs_[0])*irCount);
 
-    auto delays_ = reinterpret_cast<ubyte2*>(base + offset);
-    offset += sizeof(delays_[0])*irCount;
+    auto delays_ = al::span{reinterpret_cast<ubyte2*>(al::to_address(base + offset)), irCount};
+    offset += ptrdiff_t(sizeof(delays_[0])*irCount);
 
-    if(offset != total)
+    if(size_t(offset) != total)
         throw std::runtime_error{"HrtfStore allocation size mismatch"};
 
     /* Copy input data to storage. */
-    std::uninitialized_copy(fields.cbegin(), fields.cend(), field_);
-    std::uninitialized_copy(elevs.cbegin(), elevs.cend(), elev_);
-    std::uninitialized_copy_n(coeffs, irCount, coeffs_);
-    std::uninitialized_copy_n(delays, irCount, delays_);
+    std::uninitialized_copy(fields.cbegin(), fields.cend(), field_.begin());
+    std::uninitialized_copy(elevs.cbegin(), elevs.cend(), elev_.begin());
+    std::uninitialized_copy_n(coeffs, irCount, coeffs_.begin());
+    std::uninitialized_copy_n(delays, irCount, delays_.begin());
 
     /* Finally, assign the storage pointers. */
-    Hrtf->mFields = {field_, fields.size()};
+    Hrtf->mFields = field_;
     Hrtf->mElev = elev_;
     Hrtf->mCoeffs = coeffs_;
     Hrtf->mDelays = delays_;
@@ -460,8 +465,8 @@ std::unique_ptr<HrtfStore> CreateHrtfStore(uint rate, uint8_t irSize,
     return Hrtf;
 }
 
-void MirrorLeftHrirs(const al::span<const HrtfStore::Elevation> elevs, HrirArray *coeffs,
-    ubyte2 *delays)
+void MirrorLeftHrirs(const al::span<const HrtfStore::Elevation> elevs, al::span<HrirArray> coeffs,
+    al::span<ubyte2> delays)
 {
     for(const auto &elev : elevs)
     {
@@ -593,7 +598,7 @@ std::unique_ptr<HrtfStore> LoadHrtf00(std::istream &data)
     auto delays = std::vector<ubyte2>(irCount);
     for(auto &hrir : coeffs)
     {
-        for(auto &val : al::span<float2>{hrir.data(), irSize})
+        for(auto &val : al::span{hrir}.first(irSize))
             val[0] = float(readle<int16_t>(data)) / 32768.0f;
     }
     for(auto &val : delays)
@@ -612,7 +617,7 @@ std::unique_ptr<HrtfStore> LoadHrtf00(std::istream &data)
     }
 
     /* Mirror the left ear responses to the right ear. */
-    MirrorLeftHrirs({elevs.data(), elevs.size()}, coeffs.data(), delays.data());
+    MirrorLeftHrirs(elevs, coeffs, delays);
 
     const std::array field{HrtfStore::Field{0.0f, evCount}};
     return CreateHrtfStore(rate, static_cast<uint8_t>(irSize), field, elevs, coeffs.data(),
@@ -664,7 +669,7 @@ std::unique_ptr<HrtfStore> LoadHrtf01(std::istream &data)
     auto delays = std::vector<ubyte2>(irCount);
     for(auto &hrir : coeffs)
     {
-        for(auto &val : al::span<float2>{hrir.data(), irSize})
+        for(auto &val : al::span{hrir}.first(irSize))
             val[0] = float(readle<int16_t>(data)) / 32768.0f;
     }
     for(auto &val : delays)
@@ -683,7 +688,7 @@ std::unique_ptr<HrtfStore> LoadHrtf01(std::istream &data)
     }
 
     /* Mirror the left ear responses to the right ear. */
-    MirrorLeftHrirs({elevs.data(), elevs.size()}, coeffs.data(), delays.data());
+    MirrorLeftHrirs(elevs, coeffs, delays);
 
     const std::array field{HrtfStore::Field{0.0f, evCount}};
     return CreateHrtfStore(rate, irSize, field, elevs, coeffs.data(), delays.data());
@@ -760,7 +765,7 @@ std::unique_ptr<HrtfStore> LoadHrtf02(std::istream &data)
 
         const size_t ebase{elevs.size()};
         elevs.resize(ebase + evCount);
-        for(auto &elev : al::span<HrtfStore::Elevation>(elevs.data()+ebase, evCount))
+        for(auto &elev : al::span{elevs}.subspan(ebase, evCount))
             elev.azCount = readle<uint8_t>(data);
         if(!data || data.eof())
             throw std::runtime_error{"Premature end of file"};
@@ -794,7 +799,7 @@ std::unique_ptr<HrtfStore> LoadHrtf02(std::istream &data)
         {
             for(auto &hrir : coeffs)
             {
-                for(auto &val : al::span<float2>{hrir.data(), irSize})
+                for(auto &val : al::span{hrir}.first(irSize))
                     val[0] = float(readle<int16_t>(data)) / 32768.0f;
             }
         }
@@ -802,7 +807,7 @@ std::unique_ptr<HrtfStore> LoadHrtf02(std::istream &data)
         {
             for(auto &hrir : coeffs)
             {
-                for(auto &val : al::span<float2>{hrir.data(), irSize})
+                for(auto &val : al::span{hrir}.first(irSize))
                     val[0] = static_cast<float>(readle<int,24>(data)) / 8388608.0f;
             }
         }
@@ -822,7 +827,7 @@ std::unique_ptr<HrtfStore> LoadHrtf02(std::istream &data)
         }
 
         /* Mirror the left ear responses to the right ear. */
-        MirrorLeftHrirs({elevs.data(), elevs.size()}, coeffs.data(), delays.data());
+        MirrorLeftHrirs(elevs, coeffs, delays);
     }
     else if(channelType == ChanType_LeftRight)
     {
@@ -830,7 +835,7 @@ std::unique_ptr<HrtfStore> LoadHrtf02(std::istream &data)
         {
             for(auto &hrir : coeffs)
             {
-                for(auto &val : al::span<float2>{hrir.data(), irSize})
+                for(auto &val : al::span{hrir}.first(irSize))
                 {
                     val[0] = float(readle<int16_t>(data)) / 32768.0f;
                     val[1] = float(readle<int16_t>(data)) / 32768.0f;
@@ -841,7 +846,7 @@ std::unique_ptr<HrtfStore> LoadHrtf02(std::istream &data)
         {
             for(auto &hrir : coeffs)
             {
-                for(auto &val : al::span<float2>{hrir.data(), irSize})
+                for(auto &val : al::span{hrir}.first(irSize))
                 {
                     val[0] = static_cast<float>(readle<int,24>(data)) / 8388608.0f;
                     val[1] = static_cast<float>(readle<int,24>(data)) / 8388608.0f;
@@ -1007,7 +1012,7 @@ std::unique_ptr<HrtfStore> LoadHrtf03(std::istream &data)
 
         const size_t ebase{elevs.size()};
         elevs.resize(ebase + evCount);
-        for(auto &elev : al::span<HrtfStore::Elevation>(elevs.data()+ebase, evCount))
+        for(auto &elev : al::span{elevs}.subspan(ebase, evCount))
             elev.azCount = readle<uint8_t>(data);
         if(!data || data.eof())
             throw std::runtime_error{"Premature end of file"};
@@ -1039,7 +1044,7 @@ std::unique_ptr<HrtfStore> LoadHrtf03(std::istream &data)
     {
         for(auto &hrir : coeffs)
         {
-            for(auto &val : al::span<float2>{hrir.data(), irSize})
+            for(auto &val : al::span{hrir}.first(irSize))
                 val[0] = static_cast<float>(readle<int,24>(data)) / 8388608.0f;
         }
         for(auto &val : delays)
@@ -1058,13 +1063,13 @@ std::unique_ptr<HrtfStore> LoadHrtf03(std::istream &data)
         }
 
         /* Mirror the left ear responses to the right ear. */
-        MirrorLeftHrirs({elevs.data(), elevs.size()}, coeffs.data(), delays.data());
+        MirrorLeftHrirs(elevs, coeffs, delays);
     }
     else if(channelType == ChanType_LeftRight)
     {
         for(auto &hrir : coeffs)
         {
-            for(auto &val : al::span<float2>{hrir.data(), irSize})
+            for(auto &val : al::span{hrir}.first(irSize))
             {
                 val[0] = static_cast<float>(readle<int,24>(data)) / 8388608.0f;
                 val[1] = static_cast<float>(readle<int,24>(data)) / 8388608.0f;
@@ -1296,12 +1301,14 @@ try {
             ERR("Could not get resource %u, %.*s\n", residx, al::sizei(name), name.data());
             return nullptr;
         }
-        stream = std::make_unique<idstream>(res.begin(), res.end());
+        /* NOLINTNEXTLINE(*-const-cast) */
+        stream = std::make_unique<idstream>(al::span{const_cast<char*>(res.data()), res.size()});
     }
     else
     {
         TRACE("Loading %s...\n", fname.c_str());
-        auto fstr = std::make_unique<al::ifstream>(fname.c_str(), std::ios::binary);
+        auto fstr = std::make_unique<std::ifstream>(std::filesystem::u8path(fname),
+            std::ios::binary);
         if(!fstr->is_open())
         {
             ERR("Could not open %s\n", fname.c_str());
@@ -1355,7 +1362,7 @@ try {
         const size_t irCount{size_t{hrtf->mElev[lastEv].irOffset} + hrtf->mElev[lastEv].azCount};
 
         /* Resample all the IRs. */
-        std::array<std::array<double,HrirLength>,2> inout;
+        std::array<std::array<double,HrirLength>,2> inout{};
         PPhaseResampler rs;
         rs.init(hrtf->mSampleRate, devrate);
         for(size_t i{0};i < irCount;++i)
@@ -1366,7 +1373,7 @@ try {
             {
                 std::transform(coeffs.cbegin(), coeffs.cend(), inout[0].begin(),
                     [j](const float2 &in) noexcept -> double { return in[j]; });
-                rs.process(HrirLength, inout[0].data(), HrirLength, inout[1].data());
+                rs.process(inout[0], inout[1]);
                 for(size_t k{0};k < HrirLength;++k)
                     coeffs[k][j] = static_cast<float>(inout[1][k]);
             }

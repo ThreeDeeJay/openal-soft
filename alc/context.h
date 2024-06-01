@@ -3,10 +3,10 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
-#include <stdint.h>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -20,6 +20,7 @@
 #include "al/listener.h"
 #include "almalloc.h"
 #include "alnumeric.h"
+#include "althreads.h"
 #include "atomic.h"
 #include "core/context.h"
 #include "inprogext.h"
@@ -40,9 +41,9 @@ struct DebugGroup;
 struct EffectSlotSubList;
 struct SourceSubList;
 
-enum class DebugSource : uint8_t;
-enum class DebugType : uint8_t;
-enum class DebugSeverity : uint8_t;
+enum class DebugSource : std::uint8_t;
+enum class DebugType : std::uint8_t;
+enum class DebugSeverity : std::uint8_t;
 
 using uint = unsigned int;
 
@@ -80,7 +81,7 @@ struct ALCcontext : public al::intrusive_ref<ALCcontext>, ContextBase {
 
     std::mutex mPropLock;
 
-    std::atomic<ALenum> mLastError{AL_NO_ERROR};
+    al::tss<ALenum> mLastThreadError{AL_NO_ERROR};
 
     const ContextFlagBitset mContextFlags;
     std::atomic<bool> mDebugEnabled{false};
@@ -541,23 +542,15 @@ ContextRef GetContextRef() noexcept;
 void UpdateContextProps(ALCcontext *context);
 
 
-extern bool TrapALError;
+inline bool TrapALError{false};
 
 
 #ifdef ALSOFT_EAX
-ALenum AL_APIENTRY EAXSet(
-    const GUID* property_set_id,
-    ALuint property_id,
-    ALuint property_source_id,
-    ALvoid* property_value,
-    ALuint property_value_size) noexcept;
+auto AL_APIENTRY EAXSet(const GUID *property_set_id, ALuint property_id,
+    ALuint source_id, ALvoid *value, ALuint value_size) noexcept -> ALenum;
 
-ALenum AL_APIENTRY EAXGet(
-    const GUID* property_set_id,
-    ALuint property_id,
-    ALuint property_source_id,
-    ALvoid* property_value,
-    ALuint property_value_size) noexcept;
+auto AL_APIENTRY EAXGet(const GUID *property_set_id, ALuint property_id,
+    ALuint source_id, ALvoid *value, ALuint value_size) noexcept -> ALenum;
 #endif // ALSOFT_EAX
 
 #endif /* ALC_CONTEXT_H */

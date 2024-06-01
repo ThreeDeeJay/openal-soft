@@ -20,21 +20,20 @@
 
 #include "config.h"
 
-#include <cctype>
-#include <cstdlib>
-#include <cstring>
+#include <string_view>
+#include <vector>
 
 #include "AL/al.h"
 #include "AL/alc.h"
 
 #include "alc/context.h"
+#include "alc/inprogext.h"
 #include "alstring.h"
-#include "core/except.h"
 #include "direct_defs.h"
 #include "opthelpers.h"
 
 
-AL_API DECL_FUNC1(ALboolean, alIsExtensionPresent, const ALchar*)
+AL_API DECL_FUNC1(ALboolean, alIsExtensionPresent, const ALchar*,extName)
 FORCE_ALIGN ALboolean AL_APIENTRY alIsExtensionPresentDirect(ALCcontext *context, const ALchar *extName) noexcept
 {
     if(!extName) UNLIKELY
@@ -68,12 +67,12 @@ FORCE_ALIGN ALvoid* AL_APIENTRY alGetProcAddressDirect(ALCcontext*, const ALchar
 
 AL_API ALenum AL_APIENTRY alGetEnumValue(const ALchar *enumName) noexcept
 {
-    if(!enumName) return static_cast<ALenum>(0);
+    if(!enumName) return ALenum{0};
     return alcGetEnumValue(nullptr, enumName);
 }
 
 FORCE_ALIGN ALenum AL_APIENTRY alGetEnumValueDirect(ALCcontext*, const ALchar *enumName) noexcept
 {
-    if(!enumName) return static_cast<ALenum>(0);
+    if(!enumName) return ALenum{0};
     return alcGetEnumValue(nullptr, enumName);
 }

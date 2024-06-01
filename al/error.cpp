@@ -20,6 +20,8 @@
 
 #include "config.h"
 
+#include "error.h"
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -32,7 +34,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <mutex>
+#include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "AL/al.h"
@@ -41,23 +45,31 @@
 #include "al/debug.h"
 #include "alc/alconfig.h"
 #include "alc/context.h"
-#include "almalloc.h"
-#include "alstring.h"
-#include "core/except.h"
+#include "alc/inprogext.h"
 #include "core/logging.h"
-#include "direct_defs.h"
 #include "opthelpers.h"
 #include "strutils.h"
 
 
-bool TrapALError{false};
+namespace al {
+context_error::context_error(ALenum code, const char *msg, ...) : mErrorCode{code}
+{
+    /* NOLINTBEGIN(*-array-to-pointer-decay) */
+    std::va_list args;
+    va_start(args, msg);
+    setMessage(msg, args);
+    va_end(args);
+    /* NOLINTEND(*-array-to-pointer-decay) */
+}
+context_error::~context_error() = default;
+} /* namespace al */
 
 void ALCcontext::setError(ALenum errorCode, const char *msg, ...)
 {
     auto message = std::vector<char>(256);
 
     /* NOLINTBEGIN(*-array-to-pointer-decay) */
-    va_list args, args2;
+    std::va_list args, args2;
     va_start(args, msg);
     va_copy(args2, args);
     int msglen{std::vsnprintf(message.data(), message.size(), msg, args)};
@@ -91,8 +103,8 @@ void ALCcontext::setError(ALenum errorCode, const char *msg, ...)
 #endif
     }
 
-    ALenum curerr{AL_NO_ERROR};
-    mLastError.compare_exchange_strong(curerr, errorCode);
+    if(mLastThreadError.get() == AL_NO_ERROR)
+        mLastThreadError.set(errorCode);
 
     debugMessage(DebugSource::API, DebugType::Error, 0, DebugSeverity::High,
         {msg, static_cast<uint>(msglen)});
@@ -138,5 +150,8 @@ AL_API auto AL_APIENTRY alGetError() noexcept -> ALenum
 
 FORCE_ALIGN ALenum AL_APIENTRY alGetErrorDirect(ALCcontext *context) noexcept
 {
-    return context->mLastError.exchange(AL_NO_ERROR);
+    ALenum ret{context->mLastThreadError.get()};
+    if(ret != AL_NO_ERROR) UNLIKELY
+        context->mLastThreadError.set(AL_NO_ERROR);
+    return ret;
 }

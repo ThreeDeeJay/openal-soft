@@ -22,65 +22,56 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdint>
 #include <cstdlib>
-#include <iterator>
+#include <functional>
+#include <variant>
 
 #include "alc/effects/base.h"
-#include "almalloc.h"
 #include "alnumbers.h"
 #include "alnumeric.h"
 #include "alspan.h"
 #include "core/ambidefs.h"
 #include "core/bufferline.h"
 #include "core/context.h"
-#include "core/devformat.h"
 #include "core/device.h"
+#include "core/effects/base.h"
 #include "core/effectslot.h"
 #include "core/filters/biquad.h"
 #include "core/mixer.h"
 #include "intrusive_ptr.h"
+#include "opthelpers.h"
 
+struct BufferStorage;
 
 namespace {
 
 using uint = unsigned int;
 
-inline float Sin(uint index, float scale)
-{ return std::sin(static_cast<float>(index) * scale); }
+struct SinFunc {
+    static auto Get(uint index, float scale) noexcept(noexcept(std::sin(0.0f))) -> float
+    { return std::sin(static_cast<float>(index) * scale); }
+};
 
-inline float Saw(uint index, float scale)
-{ return static_cast<float>(index)*scale - 1.0f; }
+struct SawFunc {
+    static constexpr auto Get(uint index, float scale) noexcept -> float
+    { return static_cast<float>(index)*scale - 1.0f; }
+};
 
-inline float Square(uint index, float scale)
-{ return float(static_cast<float>(index)*scale < 0.5f)*2.0f - 1.0f; }
+struct SquareFunc {
+    static constexpr auto Get(uint index, float scale) noexcept -> float
+    { return float(static_cast<float>(index)*scale < 0.5f)*2.0f - 1.0f; }
+};
 
-inline float One(uint, float)
-{ return 1.0f; }
+struct OneFunc {
+    static constexpr auto Get(uint, float) noexcept -> float
+    { return 1.0f; }
+};
+
 
 struct ModulatorState final : public EffectState {
-    template<float (&func)(uint,float)>
-    void Modulate(size_t todo)
-    {
-        const uint range{mRange};
-        const float scale{mIndexScale};
-        uint index{mIndex};
-
-        ASSUME(range > 1);
-        ASSUME(todo > 0);
-
-        for(size_t i{0};i < todo;)
-        {
-            size_t rem{std::min(todo-i, size_t{range-index})};
-            do {
-                mModSamples[i++] = func(index++, scale);
-            } while(--rem);
-            if(index == range)
-                index = 0;
-        }
-        mIndex = index;
-    }
-
-    void (ModulatorState::*mGenModSamples)(size_t){};
+    std::variant<OneFunc,SinFunc,SawFunc,SquareFunc> mSampleGen;
 
     uint mIndex{0};
     uint mRange{1};
@@ -106,13 +97,6 @@ struct ModulatorState final : public EffectState {
     void process(const size_t samplesToDo, const al::span<const FloatBufferLine> samplesIn,
         const al::span<FloatBufferLine> samplesOut) override;
 };
-
-template<>
-void ModulatorState::Modulate<One>(size_t todo)
-{
-    std::fill_n(mModSamples.begin(), todo, 1.0f);
-    mIndex = 0;
-}
 
 void ModulatorState::deviceUpdate(const DeviceBase*, const BufferStorage*)
 {
@@ -148,19 +132,19 @@ void ModulatorState::update(const ContextBase *context, const EffectSlot *slot,
     if(mRange == 1)
     {
         mIndexScale = 0.0f;
-        mGenModSamples = &ModulatorState::Modulate<One>;
+        mSampleGen.emplace<OneFunc>();
     }
     else if(props.Waveform == ModulatorWaveform::Sinusoid)
     {
         mIndexScale = al::numbers::pi_v<float>*2.0f / static_cast<float>(mRange);
-        mGenModSamples = &ModulatorState::Modulate<Sin>;
+        mSampleGen.emplace<SinFunc>();
     }
     else if(props.Waveform == ModulatorWaveform::Sawtooth)
     {
         mIndexScale = 2.0f / static_cast<float>(mRange-1);
-        mGenModSamples = &ModulatorState::Modulate<Saw>;
+        mSampleGen.emplace<SawFunc>();
     }
-    else /*if(props.Waveform == ModulatorWaveform::Square)*/
+    else if(props.Waveform == ModulatorWaveform::Square)
     {
         /* For square wave, the range should be even (there should be an equal
          * number of high and low samples). An odd number of samples per cycle
@@ -168,7 +152,7 @@ void ModulatorState::update(const ContextBase *context, const EffectSlot *slot,
          */
         mRange = (mRange+1) & ~1u;
         mIndexScale = 1.0f / static_cast<float>(mRange-1);
-        mGenModSamples = &ModulatorState::Modulate<Square>;
+        mSampleGen.emplace<SquareFunc>();
     }
 
     float f0norm{props.HighPassCutoff / static_cast<float>(device->Frequency)};
@@ -189,19 +173,38 @@ void ModulatorState::update(const ContextBase *context, const EffectSlot *slot,
 
 void ModulatorState::process(const size_t samplesToDo, const al::span<const FloatBufferLine> samplesIn, const al::span<FloatBufferLine> samplesOut)
 {
-    (this->*mGenModSamples)(samplesToDo);
+    ASSUME(samplesToDo > 0);
 
-    auto chandata = std::begin(mChans);
+    std::visit([this,samplesToDo](auto&& type)
+    {
+        const uint range{mRange};
+        const float scale{mIndexScale};
+        uint index{mIndex};
+
+        ASSUME(range > 1);
+
+        for(size_t i{0};i < samplesToDo;)
+        {
+            size_t rem{std::min(samplesToDo-i, size_t{range-index})};
+            do {
+                mModSamples[i++] = type.Get(index++, scale);
+            } while(--rem);
+            if(index == range)
+                index = 0;
+        }
+        mIndex = index;
+    }, mSampleGen);
+
+    auto chandata = mChans.begin();
     for(const auto &input : samplesIn)
     {
-        const size_t outidx{chandata->mTargetChannel};
-        if(outidx != InvalidChannelIndex)
+        if(const size_t outidx{chandata->mTargetChannel}; outidx != InvalidChannelIndex)
         {
-            chandata->mFilter.process({input.data(), samplesToDo}, mBuffer.data());
-            for(size_t i{0u};i < samplesToDo;++i)
-                mBuffer[i] *= mModSamples[i];
+            chandata->mFilter.process(al::span{input}.first(samplesToDo), mBuffer);
+            std::transform(mBuffer.cbegin(), mBuffer.cbegin()+samplesToDo, mModSamples.cbegin(),
+                mBuffer.begin(), std::multiplies<>{});
 
-            MixSamples({mBuffer.data(), samplesToDo}, samplesOut[outidx].data(),
+            MixSamples(al::span{mBuffer}.first(samplesToDo), samplesOut[outidx],
                 chandata->mCurrentGain, chandata->mTargetGain, std::min(samplesToDo, 64_uz));
         }
         ++chandata;

@@ -13,6 +13,7 @@
 
 #ifdef ALSOFT_EAX
 #include "alnumeric.h"
+#include "al/eax/effect.h"
 #include "al/eax/exception.h"
 #include "al/eax/utils.h"
 #endif // ALSOFT_EAX
@@ -34,15 +35,15 @@ constexpr EffectProps genDefaultProps() noexcept
 
 const EffectProps AutowahEffectProps{genDefaultProps()};
 
-void EffectHandler::SetParami(AutowahProps&, ALenum param, int)
+void AutowahEffectHandler::SetParami(AutowahProps&, ALenum param, int)
 { throw effect_exception{AL_INVALID_ENUM, "Invalid autowah integer property 0x%04x", param}; }
-void EffectHandler::SetParamiv(AutowahProps&, ALenum param, const int*)
+void AutowahEffectHandler::SetParamiv(AutowahProps&, ALenum param, const int*)
 {
     throw effect_exception{AL_INVALID_ENUM, "Invalid autowah integer vector property 0x%04x",
         param};
 }
 
-void EffectHandler::SetParamf(AutowahProps &props, ALenum param, float val)
+void AutowahEffectHandler::SetParamf(AutowahProps &props, ALenum param, float val)
 {
     switch(param)
     {
@@ -74,18 +75,18 @@ void EffectHandler::SetParamf(AutowahProps &props, ALenum param, float val)
         throw effect_exception{AL_INVALID_ENUM, "Invalid autowah float property 0x%04x", param};
     }
 }
-void EffectHandler::SetParamfv(AutowahProps &props,  ALenum param, const float *vals)
-{ SetParamf(props, param, vals[0]); }
+void AutowahEffectHandler::SetParamfv(AutowahProps &props,  ALenum param, const float *vals)
+{ SetParamf(props, param, *vals); }
 
-void EffectHandler::GetParami(const AutowahProps&, ALenum param, int*)
+void AutowahEffectHandler::GetParami(const AutowahProps&, ALenum param, int*)
 { throw effect_exception{AL_INVALID_ENUM, "Invalid autowah integer property 0x%04x", param}; }
-void EffectHandler::GetParamiv(const AutowahProps&, ALenum param, int*)
+void AutowahEffectHandler::GetParamiv(const AutowahProps&, ALenum param, int*)
 {
     throw effect_exception{AL_INVALID_ENUM, "Invalid autowah integer vector property 0x%04x",
         param};
 }
 
-void EffectHandler::GetParamf(const AutowahProps &props, ALenum param, float *val)
+void AutowahEffectHandler::GetParamf(const AutowahProps &props, ALenum param, float *val)
 {
     switch(param)
     {
@@ -99,7 +100,7 @@ void EffectHandler::GetParamf(const AutowahProps &props, ALenum param, float *va
     }
 
 }
-void EffectHandler::GetParamfv(const AutowahProps &props, ALenum param, float *vals)
+void AutowahEffectHandler::GetParamfv(const AutowahProps &props, ALenum param, float *vals)
 { GetParamf(props, param, vals); }
 
 #ifdef ALSOFT_EAX

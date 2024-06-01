@@ -22,24 +22,24 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
-#include <iterator>
-#include <utility>
+#include <variant>
 
 #include "alc/effects/base.h"
-#include "almalloc.h"
 #include "alnumbers.h"
 #include "alnumeric.h"
 #include "alspan.h"
 #include "core/ambidefs.h"
 #include "core/bufferline.h"
 #include "core/context.h"
-#include "core/devformat.h"
 #include "core/device.h"
+#include "core/effects/base.h"
 #include "core/effectslot.h"
 #include "core/mixer.h"
 #include "intrusive_ptr.h"
 
+struct BufferStorage;
 
 namespace {
 
@@ -68,10 +68,10 @@ struct AutowahState final : public EffectState {
     struct ChannelData {
         uint mTargetChannel{InvalidChannelIndex};
 
-        /* Effect filters' history. */
-        struct {
+        struct FilterHistory {
             float z1{}, z2{};
-        } mFilter;
+        };
+        FilterHistory mFilter;
 
         /* Effect gains for each output channel */
         float mCurrentGain{};
@@ -171,7 +171,7 @@ void AutowahState::process(const size_t samplesToDo,
     }
     mEnvDelay = env_delay;
 
-    auto chandata = std::begin(mChans);
+    auto chandata = mChans.begin();
     for(const auto &insamples : samplesIn)
     {
         const size_t outidx{chandata->mTargetChannel};
@@ -214,7 +214,7 @@ void AutowahState::process(const size_t samplesToDo,
         chandata->mFilter.z2 = z2;
 
         /* Now, mix the processed sound data to the output. */
-        MixSamples({mBufferOut.data(), samplesToDo}, samplesOut[outidx].data(),
+        MixSamples(al::span{mBufferOut}.first(samplesToDo), samplesOut[outidx],
             chandata->mCurrentGain, chandata->mTargetGain, samplesToDo);
         ++chandata;
     }

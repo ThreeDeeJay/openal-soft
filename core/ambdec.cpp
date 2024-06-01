@@ -8,12 +8,13 @@
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <sstream>
 #include <string>
 
 #include "albit.h"
-#include "alfstream.h"
 #include "alspan.h"
 #include "opthelpers.h"
 
@@ -81,7 +82,7 @@ AmbDecConf::~AmbDecConf() = default;
 
 std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
 {
-    al::ifstream f{fname};
+    std::ifstream f{std::filesystem::u8path(fname)};
     if(!f.is_open())
         return std::string("Failed to open file \"")+fname+"\"";
 
@@ -129,7 +130,7 @@ std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
         else if(scope == ReaderScope::LFMatrix || scope == ReaderScope::HFMatrix)
         {
             auto &gains = (scope == ReaderScope::LFMatrix) ? LFOrderGain : HFOrderGain;
-            auto *matrix = (scope == ReaderScope::LFMatrix) ? LFMatrix : HFMatrix;
+            auto matrix = (scope == ReaderScope::LFMatrix) ? LFMatrix : HFMatrix;
             auto &pos = (scope == ReaderScope::LFMatrix) ? lfmatrix_pos : hfmatrix_pos;
 
             if(command == "order_gain")
@@ -260,8 +261,8 @@ std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
             if(Matrix.empty())
             {
                 Matrix.resize(Speakers.size() * FreqBands);
-                LFMatrix = Matrix.data();
-                HFMatrix = LFMatrix + Speakers.size()*(FreqBands-1);
+                LFMatrix = al::span{Matrix}.first(Speakers.size());
+                HFMatrix = al::span{Matrix}.subspan(Speakers.size()*(FreqBands-1));
             }
 
             if(FreqBands == 1)

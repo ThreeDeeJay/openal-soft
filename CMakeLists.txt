@@ -203,31 +203,6 @@ if(NOT HAVE_STDC_FORMAT_MACROS)
     set(CPP_DEFS ${CPP_DEFS} __STDC_FORMAT_MACROS)
 endif()
 
-if(NOT WIN32)
-    # Check if _POSIX_C_SOURCE and _XOPEN_SOURCE needs to be set for POSIX functions
-    check_symbol_exists(posix_memalign stdlib.h HAVE_POSIX_MEMALIGN_DEFAULT)
-    if(NOT HAVE_POSIX_MEMALIGN_DEFAULT)
-        set(OLD_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS})
-        set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -D_POSIX_C_SOURCE=200112L -D_XOPEN_SOURCE=600")
-        check_symbol_exists(posix_memalign stdlib.h HAVE_POSIX_MEMALIGN_POSIX)
-        if(NOT HAVE_POSIX_MEMALIGN_POSIX)
-            set(CMAKE_REQUIRED_FLAGS ${OLD_REQUIRED_FLAGS})
-        else()
-            set(CPP_DEFS ${CPP_DEFS} _POSIX_C_SOURCE=200112L _XOPEN_SOURCE=600)
-        endif()
-    endif()
-    unset(OLD_REQUIRED_FLAGS)
-endif()
-
-# C99 has restrict, but C++ does not, so we can only utilize __restrict.
-check_cxx_source_compiles("int *__restrict foo;
-int main() { return 0; }" HAVE___RESTRICT)
-if(HAVE___RESTRICT)
-    set(CPP_DEFS ${CPP_DEFS} RESTRICT=__restrict)
-else()
-    set(CPP_DEFS ${CPP_DEFS} "RESTRICT=")
-endif()
-
 # Some systems may need libatomic for atomic functions to work
 set(OLD_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES})
 set(CMAKE_REQUIRED_LIBRARIES ${OLD_REQUIRED_LIBRARIES} atomic)
@@ -293,6 +268,11 @@ else()
         if(HAVE_WNO_CXX20_EXT)
             set(C_FLAGS ${C_FLAGS} $<$<COMPILE_LANGUAGE:CXX>:-Wno-c++20-extensions>)
         endif()
+    endif()
+
+    check_cxx_compiler_flag(-Wno-interference-size HAVE_WNO_INTERFERENCE_SIZE)
+    if(HAVE_WNO_INTERFERENCE_SIZE)
+        set(C_FLAGS ${C_FLAGS} $<$<COMPILE_LANGUAGE:CXX>:-Wno-interference-size>)
     endif()
 
     if(ALSOFT_WERROR)
@@ -512,13 +492,9 @@ if(HAVE_SSE2)
 endif()
 
 
-check_include_file(malloc.h HAVE_MALLOC_H)
 check_include_file(cpuid.h HAVE_CPUID_H)
 check_include_file(intrin.h HAVE_INTRIN_H)
 check_include_file(guiddef.h HAVE_GUIDDEF_H)
-if(NOT HAVE_GUIDDEF_H)
-    check_include_file(initguid.h HAVE_INITGUID_H)
-endif()
 
 # Some systems need libm for some math functions to work
 set(MATH_LIB )
@@ -599,17 +575,15 @@ if(NOT WIN32)
     endif()
 endif()
 
-check_symbol_exists(getopt unistd.h HAVE_GETOPT)
-
 
 # Common sources used by both the OpenAL implementation library, the OpenAL
 # router, and certain tools and examples.
 set(COMMON_OBJS
+    common/alassert.cpp
+    common/alassert.h
     common/albit.h
     common/alcomplex.cpp
     common/alcomplex.h
-    common/alfstream.cpp
-    common/alfstream.h
     common/almalloc.h
     common/alnumbers.h
     common/alnumeric.h
@@ -620,6 +594,7 @@ set(COMMON_OBJS
     common/alstring.h
     common/althrd_setname.cpp
     common/althrd_setname.h
+    common/althreads.h
     common/altraits.h
     common/atomic.h
     common/comptr.h
@@ -698,6 +673,8 @@ set(CORE_OBJS
     core/mixer.cpp
     core/mixer.h
     core/resampler_limits.h
+    core/storage_formats.cpp
+    core/storage_formats.h
     core/uhjfilter.cpp
     core/uhjfilter.h
     core/uiddefs.cpp
@@ -782,6 +759,7 @@ set(OPENAL_OBJS
     al/effects/reverb.cpp
     al/effects/vmorpher.cpp
     al/error.cpp
+    al/error.h
     al/event.cpp
     al/event.h
     al/extension.cpp
@@ -986,17 +964,21 @@ if(NOT WIN32)
         endif()
     endif()
 
-    # Check SndIO backend
-    option(ALSOFT_BACKEND_SNDIO "Enable SndIO backend" ON)
+    # Check SndIO backend (disabled by default on non-BSDs)
+    if(BSD)
+        option(ALSOFT_BACKEND_SNDIO "Enable SndIO backend" ON)
+    else()
+        option(ALSOFT_BACKEND_SNDIO "Enable SndIO backend" OFF)
+    endif()
     option(ALSOFT_REQUIRE_SNDIO "Require SndIO backend" OFF)
     if(ALSOFT_BACKEND_SNDIO)
-        find_package(SoundIO)
-        if(SOUNDIO_FOUND)
+        find_package(SndIO)
+        if(SNDIO_FOUND)
             set(HAVE_SNDIO 1)
             set(BACKENDS  "${BACKENDS} SndIO (linked),")
             set(ALC_OBJS  ${ALC_OBJS} alc/backends/sndio.cpp alc/backends/sndio.h)
-            set(EXTRA_LIBS ${SOUNDIO_LIBRARIES} ${EXTRA_LIBS})
-            set(INC_PATHS ${INC_PATHS} ${SOUNDIO_INCLUDE_DIRS})
+            set(EXTRA_LIBS ${SNDIO_LIBRARIES} ${EXTRA_LIBS})
+            set(INC_PATHS ${INC_PATHS} ${SNDIO_INCLUDE_DIRS})
         endif()
     endif()
 endif()
@@ -1507,7 +1489,7 @@ if(WIN32 AND MINGW AND ALSOFT_BUILD_IMPORT_LIB AND NOT LIBTYPE STREQUAL "STATIC"
             message(STATUS "WARNING: Cannot find dlltool, disabling .def/.lib generation")
         endif()
     else()
-        target_link_options(OpenAL PRIVATE "-Wl,--output-def,OpenAL32.def")
+        target_link_options(OpenAL PRIVATE "-Wl,--output-def,${PROJECT_BINARY_DIR}/OpenAL32.def")
         add_custom_command(TARGET OpenAL POST_BUILD
             COMMAND "${SED_EXECUTABLE}" -i -e "s/ @[^ ]*//" OpenAL32.def
             COMMAND "${CMAKE_DLLTOOL}" -d OpenAL32.def -l OpenAL32.lib -D OpenAL32.dll
@@ -1659,9 +1641,6 @@ if(ALSOFT_UTILS)
             utils/makemhr/loadsofa.h
             utils/makemhr/makemhr.cpp
             utils/makemhr/makemhr.h)
-        if(NOT HAVE_GETOPT)
-            set(MAKEMHR_SRCS  ${MAKEMHR_SRCS} utils/getopt.c utils/getopt.h)
-        endif()
         add_executable(makemhr ${MAKEMHR_SRCS})
         target_compile_definitions(makemhr PRIVATE ${CPP_DEFS})
         target_include_directories(makemhr
@@ -1751,6 +1730,11 @@ if(ALSOFT_EXAMPLES)
             ${UNICODE_FLAG})
         set_target_properties(alstreamcb PROPERTIES ${DEFAULT_TARGET_PROPS})
 
+        add_executable(aldirect examples/aldirect.cpp)
+        target_link_libraries(aldirect PRIVATE ${LINKER_FLAGS} SndFile::SndFile al-excommon
+            ${UNICODE_FLAG})
+        set_target_properties(aldirect PROPERTIES ${DEFAULT_TARGET_PROPS})
+
         add_executable(alconvolve examples/alconvolve.c)
         target_link_libraries(alconvolve PRIVATE ${LINKER_FLAGS} alcommon SndFile::SndFile
             al-excommon ${UNICODE_FLAG})
@@ -1758,7 +1742,7 @@ if(ALSOFT_EXAMPLES)
 
         if(ALSOFT_INSTALL_EXAMPLES)
             set(EXTRA_INSTALLS ${EXTRA_INSTALLS} alplay alstream alreverb almultireverb allatency
-                alhrtf)
+                alhrtf aldirect)
         endif()
 
         message(STATUS "Building SndFile example programs")

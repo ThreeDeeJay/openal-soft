@@ -3,9 +3,9 @@
 
 #include "event.h"
 
-#include <algorithm>
+#include <array>
 #include <atomic>
-#include <cstring>
+#include <bitset>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -14,21 +14,26 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
+#include <variant>
 
 #include "AL/al.h"
 #include "AL/alc.h"
+#include "AL/alext.h"
 
 #include "alc/context.h"
-#include "alc/effects/base.h"
 #include "alc/inprogext.h"
-#include "almalloc.h"
+#include "alsem.h"
+#include "alspan.h"
 #include "core/async_event.h"
-#include "core/except.h"
+#include "core/context.h"
+#include "core/effects/base.h"
 #include "core/logging.h"
-#include "core/voice_change.h"
 #include "debug.h"
 #include "direct_defs.h"
+#include "error.h"
+#include "intrusive_ptr.h"
 #include "opthelpers.h"
 #include "ringbuffer.h"
 
@@ -55,15 +60,10 @@ int EventThread(ALCcontext *context)
         }
 
         std::lock_guard<std::mutex> eventlock{context->mEventCbLock};
-        do {
-            auto *evt_ptr = std::launder(reinterpret_cast<AsyncEvent*>(evt_data.buf));
-            evt_data.buf += sizeof(AsyncEvent);
-            evt_data.len -= 1;
-
-            AsyncEvent event{std::move(*evt_ptr)};
-            std::destroy_at(evt_ptr);
-            ring->readAdvance(1);
-
+        auto evt_span = al::span{std::launder(reinterpret_cast<AsyncEvent*>(evt_data.buf)),
+            evt_data.len};
+        for(auto &event : evt_span)
+        {
             quitnow = std::holds_alternative<AsyncKillThread>(event);
             if(quitnow) UNLIKELY break;
 
@@ -132,7 +132,9 @@ int EventThread(ALCcontext *context)
 
             std::visit(overloaded{proc_srcstate, proc_buffercomp, proc_release, proc_disconnect,
                 proc_killthread}, event);
-        } while(evt_data.len != 0);
+        }
+        std::destroy(evt_span.begin(), evt_span.end());
+        ring->readAdvance(evt_span.size());
     }
     return 0;
 }
@@ -183,20 +185,23 @@ void StopEventThrd(ALCcontext *ctx)
         ctx->mEventThread.join();
 }
 
-AL_API DECL_FUNCEXT3(void, alEventControl,SOFT, ALsizei, const ALenum*, ALboolean)
+AL_API DECL_FUNCEXT3(void, alEventControl,SOFT, ALsizei,count, const ALenum*,types, ALboolean,enable)
 FORCE_ALIGN void AL_APIENTRY alEventControlDirectSOFT(ALCcontext *context, ALsizei count,
     const ALenum *types, ALboolean enable) noexcept
-{
-    if(count < 0) context->setError(AL_INVALID_VALUE, "Controlling %d events", count);
-    if(count <= 0) return;
-    if(!types) return context->setError(AL_INVALID_VALUE, "NULL pointer");
+try {
+    if(count < 0)
+        throw al::context_error{AL_INVALID_VALUE, "Controlling %d events", count};
+    if(count <= 0) UNLIKELY return;
+
+    if(!types)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
 
     ContextBase::AsyncEventBitset flags{};
     for(ALenum evttype : al::span{types, static_cast<uint>(count)})
     {
         auto etype = GetEventType(evttype);
         if(!etype)
-            return context->setError(AL_INVALID_ENUM, "Invalid event type 0x%04x", evttype);
+            throw al::context_error{AL_INVALID_ENUM, "Invalid event type 0x%04x", evttype};
         flags.set(al::to_underlying(*etype));
     }
 
@@ -224,8 +229,11 @@ FORCE_ALIGN void AL_APIENTRY alEventControlDirectSOFT(ALCcontext *context, ALsiz
         std::lock_guard<std::mutex> eventlock{context->mEventCbLock};
     }
 }
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
+}
 
-AL_API DECL_FUNCEXT2(void, alEventCallback,SOFT, ALEVENTPROCSOFT, void*)
+AL_API DECL_FUNCEXT2(void, alEventCallback,SOFT, ALEVENTPROCSOFT,callback, void*,userParam)
 FORCE_ALIGN void AL_APIENTRY alEventCallbackDirectSOFT(ALCcontext *context,
     ALEVENTPROCSOFT callback, void *userParam) noexcept
 {

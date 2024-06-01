@@ -9,6 +9,7 @@
 
 #ifdef ALSOFT_EAX
 #include "alnumeric.h"
+#include "al/eax/effect.h"
 #include "al/eax/exception.h"
 #include "al/eax/utils.h"
 #endif // ALSOFT_EAX
@@ -36,14 +37,14 @@ constexpr EffectProps genDefaultProps() noexcept
 
 const EffectProps EqualizerEffectProps{genDefaultProps()};
 
-void EffectHandler::SetParami(EqualizerProps&, ALenum param, int)
+void EqualizerEffectHandler::SetParami(EqualizerProps&, ALenum param, int)
 { throw effect_exception{AL_INVALID_ENUM, "Invalid equalizer integer property 0x%04x", param}; }
-void EffectHandler::SetParamiv(EqualizerProps&, ALenum param, const int*)
+void EqualizerEffectHandler::SetParamiv(EqualizerProps&, ALenum param, const int*)
 {
     throw effect_exception{AL_INVALID_ENUM, "Invalid equalizer integer-vector property 0x%04x",
         param};
 }
-void EffectHandler::SetParamf(EqualizerProps &props, ALenum param, float val)
+void EqualizerEffectHandler::SetParamf(EqualizerProps &props, ALenum param, float val)
 {
     switch(param)
     {
@@ -111,17 +112,17 @@ void EffectHandler::SetParamf(EqualizerProps &props, ALenum param, float val)
         throw effect_exception{AL_INVALID_ENUM, "Invalid equalizer float property 0x%04x", param};
     }
 }
-void EffectHandler::SetParamfv(EqualizerProps &props, ALenum param, const float *vals)
-{ SetParamf(props, param, vals[0]); }
+void EqualizerEffectHandler::SetParamfv(EqualizerProps &props, ALenum param, const float *vals)
+{ SetParamf(props, param, *vals); }
 
-void EffectHandler::GetParami(const EqualizerProps&, ALenum param, int*)
+void EqualizerEffectHandler::GetParami(const EqualizerProps&, ALenum param, int*)
 { throw effect_exception{AL_INVALID_ENUM, "Invalid equalizer integer property 0x%04x", param}; }
-void EffectHandler::GetParamiv(const EqualizerProps&, ALenum param, int*)
+void EqualizerEffectHandler::GetParamiv(const EqualizerProps&, ALenum param, int*)
 {
     throw effect_exception{AL_INVALID_ENUM, "Invalid equalizer integer-vector property 0x%04x",
         param};
 }
-void EffectHandler::GetParamf(const EqualizerProps &props, ALenum param, float *val)
+void EqualizerEffectHandler::GetParamf(const EqualizerProps &props, ALenum param, float *val)
 {
     switch(param)
     {
@@ -140,7 +141,7 @@ void EffectHandler::GetParamf(const EqualizerProps &props, ALenum param, float *
         throw effect_exception{AL_INVALID_ENUM, "Invalid equalizer float property 0x%04x", param};
     }
 }
-void EffectHandler::GetParamfv(const EqualizerProps &props, ALenum param, float *vals)
+void EqualizerEffectHandler::GetParamfv(const EqualizerProps &props, ALenum param, float *vals)
 { GetParamf(props, param, vals); }
 
 

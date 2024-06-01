@@ -34,24 +34,25 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <functional>
-#include <iterator>
+#include <variant>
 
 #include "alc/effects/base.h"
-#include "almalloc.h"
 #include "alnumbers.h"
 #include "alnumeric.h"
 #include "alspan.h"
 #include "core/ambidefs.h"
 #include "core/bufferline.h"
 #include "core/context.h"
-#include "core/devformat.h"
 #include "core/device.h"
+#include "core/effects/base.h"
 #include "core/effectslot.h"
 #include "core/mixer.h"
 #include "intrusive_ptr.h"
 
+struct BufferStorage;
 
 namespace {
 
@@ -59,7 +60,7 @@ using uint = unsigned int;
 
 constexpr size_t MaxUpdateSamples{256};
 constexpr size_t NumFormants{4};
-constexpr float QFactor{5.0f};
+constexpr float RcpQFactor{1.0f / 5.0f};
 enum : size_t {
     VowelAIndex,
     VowelBIndex,
@@ -85,14 +86,14 @@ inline float Triangle(uint index)
 inline float Half(uint) { return 0.5f; }
 
 template<float (&func)(uint)>
-void Oscillate(float *RESTRICT dst, uint index, const uint step, size_t todo)
+void Oscillate(const al::span<float> dst, uint index, const uint step)
 {
-    for(size_t i{0u};i < todo;i++)
+    std::generate(dst.begin(), dst.end(), [&index,step]
     {
         index += step;
         index &= WaveformFracMask;
-        dst[i] = func(index);
-    }
+        return func(index);
+    });
 }
 
 struct FormantFilter {
@@ -113,23 +114,26 @@ struct FormantFilter {
          */
         const float g{mCoeff};
         const float gain{mGain};
-        const float h{1.0f / (1.0f + (g/QFactor) + (g*g))};
-        const float coeff{1.0f/QFactor + g};
+        const float h{1.0f / (1.0f + (g*RcpQFactor) + (g*g))};
+        const float coeff{RcpQFactor + g};
         float s1{mS1};
         float s2{mS2};
 
-        for(size_t i{0u};i < numInput;i++)
-        {
-            const float H{(samplesIn[i] - coeff*s1 - s2)*h};
-            const float B{g*H + s1};
-            const float L{g*B + s2};
+        const auto input = al::span{samplesIn, numInput};
+        const auto output = al::span{samplesOut, numInput};
+        std::transform(input.cbegin(), input.cend(), output.cbegin(), output.begin(),
+            [g,gain,h,coeff,&s1,&s2](const float in, const float out) noexcept -> float
+            {
+                const float H{(in - coeff*s1 - s2)*h};
+                const float B{g*H + s1};
+                const float L{g*B + s2};
 
-            s1 = g*H + B;
-            s2 = g*B + L;
+                s1 = g*H + B;
+                s2 = g*B + L;
 
-            // Apply peak and accumulate samples.
-            samplesOut[i] += B * gain;
-        }
+                // Apply peak and accumulate samples.
+                return out + B*gain;
+            });
         mS1 = s1;
         mS2 = s2;
     }
@@ -155,7 +159,7 @@ struct VmorpherState final : public EffectState {
     };
     std::array<OutParams,MaxAmbiChannels> mChans;
 
-    void (*mGetSamples)(float*RESTRICT, uint, const uint, size_t){};
+    void (*mGetSamples)(const al::span<float> dst, uint index, const uint step){};
 
     uint mIndex{0};
     uint mStep{1};
@@ -282,6 +286,8 @@ void VmorpherState::update(const ContextBase *context, const EffectSlot *slot,
 
 void VmorpherState::process(const size_t samplesToDo, const al::span<const FloatBufferLine> samplesIn, const al::span<FloatBufferLine> samplesOut)
 {
+    alignas(16) std::array<float,MaxUpdateSamples> blended{};
+
     /* Following the EFX specification for a conformant implementation which describes
      * the effect as a pair of 4-band formant filters blended together using an LFO.
      */
@@ -289,11 +295,11 @@ void VmorpherState::process(const size_t samplesToDo, const al::span<const Float
     {
         const size_t td{std::min(MaxUpdateSamples, samplesToDo-base)};
 
-        mGetSamples(mLfo.data(), mIndex, mStep, td);
+        mGetSamples(al::span{mLfo}.first(td), mIndex, mStep);
         mIndex += static_cast<uint>(mStep * td);
         mIndex &= WaveformFracMask;
 
-        auto chandata = std::begin(mChans);
+        auto chandata = mChans.begin();
         for(const auto &input : samplesIn)
         {
             const size_t outidx{chandata->mTargetChannel};
@@ -307,25 +313,24 @@ void VmorpherState::process(const size_t samplesToDo, const al::span<const Float
             const auto vowelB = al::span{chandata->mFormants[VowelBIndex]};
 
             /* Process first vowel. */
-            std::fill_n(std::begin(mSampleBufferA), td, 0.0f);
+            std::fill_n(mSampleBufferA.begin(), td, 0.0f);
             vowelA[0].process(&input[base], mSampleBufferA.data(), td);
             vowelA[1].process(&input[base], mSampleBufferA.data(), td);
             vowelA[2].process(&input[base], mSampleBufferA.data(), td);
             vowelA[3].process(&input[base], mSampleBufferA.data(), td);
 
             /* Process second vowel. */
-            std::fill_n(std::begin(mSampleBufferB), td, 0.0f);
+            std::fill_n(mSampleBufferB.begin(), td, 0.0f);
             vowelB[0].process(&input[base], mSampleBufferB.data(), td);
             vowelB[1].process(&input[base], mSampleBufferB.data(), td);
             vowelB[2].process(&input[base], mSampleBufferB.data(), td);
             vowelB[3].process(&input[base], mSampleBufferB.data(), td);
 
-            alignas(16) std::array<float,MaxUpdateSamples> blended;
             for(size_t i{0u};i < td;i++)
                 blended[i] = lerpf(mSampleBufferA[i], mSampleBufferB[i], mLfo[i]);
 
             /* Now, mix the processed sound data to the output. */
-            MixSamples({blended.data(), td}, samplesOut[outidx].data()+base,
+            MixSamples(al::span{blended}.first(td), al::span{samplesOut[outidx]}.subspan(base),
                 chandata->mCurrentGain, chandata->mTargetGain, samplesToDo-base);
             ++chandata;
         }

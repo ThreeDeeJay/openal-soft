@@ -28,16 +28,16 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <new>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -51,11 +51,14 @@
 #include "alc/inprogext.h"
 #include "almalloc.h"
 #include "alnumeric.h"
-#include "atomic.h"
-#include "core/except.h"
+#include "alspan.h"
+#include "core/device.h"
 #include "core/logging.h"
+#include "core/resampler_limits.h"
 #include "core/voice.h"
 #include "direct_defs.h"
+#include "error.h"
+#include "intrusive_ptr.h"
 #include "opthelpers.h"
 
 #ifdef ALSOFT_EAX
@@ -70,7 +73,7 @@ namespace {
 
 using SubListAllocator = al::allocator<std::array<ALbuffer,64>>;
 
-std::optional<AmbiLayout> AmbiLayoutFromEnum(ALenum layout) noexcept
+constexpr auto AmbiLayoutFromEnum(ALenum layout) noexcept -> std::optional<AmbiLayout>
 {
     switch(layout)
     {
@@ -79,7 +82,7 @@ std::optional<AmbiLayout> AmbiLayoutFromEnum(ALenum layout) noexcept
     }
     return std::nullopt;
 }
-ALenum EnumFromAmbiLayout(AmbiLayout layout)
+constexpr auto EnumFromAmbiLayout(AmbiLayout layout) -> ALenum
 {
     switch(layout)
     {
@@ -89,7 +92,7 @@ ALenum EnumFromAmbiLayout(AmbiLayout layout)
     throw std::runtime_error{"Invalid AmbiLayout: "+std::to_string(int(layout))};
 }
 
-std::optional<AmbiScaling> AmbiScalingFromEnum(ALenum scale) noexcept
+constexpr auto AmbiScalingFromEnum(ALenum scale) noexcept -> std::optional<AmbiScaling>
 {
     switch(scale)
     {
@@ -99,7 +102,7 @@ std::optional<AmbiScaling> AmbiScalingFromEnum(ALenum scale) noexcept
     }
     return std::nullopt;
 }
-ALenum EnumFromAmbiScaling(AmbiScaling scale)
+constexpr auto EnumFromAmbiScaling(AmbiScaling scale) -> ALenum
 {
     switch(scale)
     {
@@ -112,7 +115,7 @@ ALenum EnumFromAmbiScaling(AmbiScaling scale)
 }
 
 #ifdef ALSOFT_EAX
-std::optional<EaxStorage> EaxStorageFromEnum(ALenum scale) noexcept
+constexpr auto EaxStorageFromEnum(ALenum scale) noexcept -> std::optional<EaxStorage>
 {
     switch(scale)
     {
@@ -122,7 +125,7 @@ std::optional<EaxStorage> EaxStorageFromEnum(ALenum scale) noexcept
     }
     return std::nullopt;
 }
-ALenum EnumFromEaxStorage(EaxStorage storage)
+constexpr auto EnumFromEaxStorage(EaxStorage storage) -> ALenum
 {
     switch(storage)
     {
@@ -174,32 +177,30 @@ constexpr ALbitfieldSOFT INVALID_MAP_FLAGS{~unsigned(AL_MAP_READ_BIT_SOFT | AL_M
     AL_MAP_PERSISTENT_BIT_SOFT)};
 
 
-bool EnsureBuffers(ALCdevice *device, size_t needed)
-{
+auto EnsureBuffers(ALCdevice *device, size_t needed) noexcept -> bool
+try {
     size_t count{std::accumulate(device->BufferList.cbegin(), device->BufferList.cend(), 0_uz,
         [](size_t cur, const BufferSubList &sublist) noexcept -> size_t
         { return cur + static_cast<ALuint>(al::popcount(sublist.FreeMask)); })};
 
-    try {
-        while(needed > count)
-        {
-            if(device->BufferList.size() >= 1<<25) UNLIKELY
-                return false;
+    while(needed > count)
+    {
+        if(device->BufferList.size() >= 1<<25) UNLIKELY
+            return false;
 
-            BufferSubList sublist{};
-            sublist.FreeMask = ~0_u64;
-            sublist.Buffers = SubListAllocator{}.allocate(1);
-            device->BufferList.emplace_back(std::move(sublist));
-            count += std::tuple_size_v<SubListAllocator::value_type>;
-        }
-    }
-    catch(...) {
-        return false;
+        BufferSubList sublist{};
+        sublist.FreeMask = ~0_u64;
+        sublist.Buffers = SubListAllocator{}.allocate(1);
+        device->BufferList.emplace_back(std::move(sublist));
+        count += std::tuple_size_v<SubListAllocator::value_type>;
     }
     return true;
 }
+catch(...) {
+    return false;
+}
 
-ALbuffer *AllocBuffer(ALCdevice *device)
+ALbuffer *AllocBuffer(ALCdevice *device) noexcept
 {
     auto sublist = std::find_if(device->BufferList.begin(), device->BufferList.end(),
         [](const BufferSubList &entry) noexcept -> bool
@@ -235,7 +236,7 @@ void FreeBuffer(ALCdevice *device, ALbuffer *buffer)
     device->BufferList[lidx].FreeMask |= 1_u64 << slidx;
 }
 
-inline ALbuffer *LookupBuffer(ALCdevice *device, ALuint id)
+auto LookupBuffer(ALCdevice *device, ALuint id) noexcept -> ALbuffer*
 {
     const size_t lidx{(id-1) >> 6};
     const ALuint slidx{(id-1) & 0x3f};
@@ -249,7 +250,7 @@ inline ALbuffer *LookupBuffer(ALCdevice *device, ALuint id)
 }
 
 
-ALuint SanitizeAlignment(FmtType type, ALuint align)
+constexpr auto SanitizeAlignment(FmtType type, ALuint align) noexcept -> ALuint
 {
     if(align == 0)
     {
@@ -284,19 +285,19 @@ ALuint SanitizeAlignment(FmtType type, ALuint align)
 
 
 /** Loads the specified data into the buffer, using the specified format. */
-void LoadData(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq, ALuint size,
+void LoadData(ALCcontext *context [[maybe_unused]], ALbuffer *ALBuf, ALsizei freq, ALuint size,
     const FmtChannels DstChannels, const FmtType DstType, const std::byte *SrcData,
     ALbitfieldSOFT access)
 {
-    if(ALBuf->ref.load(std::memory_order_relaxed) != 0 || ALBuf->MappedAccess != 0) UNLIKELY
-        return context->setError(AL_INVALID_OPERATION, "Modifying storage for in-use buffer %u",
-            ALBuf->id);
+    if(ALBuf->ref.load(std::memory_order_relaxed) != 0 || ALBuf->MappedAccess != 0)
+        throw al::context_error{AL_INVALID_OPERATION, "Modifying storage for in-use buffer %u",
+            ALBuf->id};
 
     const ALuint unpackalign{ALBuf->UnpackAlign};
     const ALuint align{SanitizeAlignment(DstType, unpackalign)};
-    if(align < 1) UNLIKELY
-        return context->setError(AL_INVALID_VALUE, "Invalid unpack alignment %u for %s samples",
-            unpackalign, NameFromFormat(DstType));
+    if(align < 1)
+        throw al::context_error{AL_INVALID_VALUE, "Invalid unpack alignment %u for %s samples",
+            unpackalign, NameFromFormat(DstType)};
 
     const ALuint ambiorder{IsBFormat(DstChannels) ? ALBuf->UnpackAmbiOrder :
         (IsUHJ(DstChannels) ? 1 : 0)};
@@ -304,12 +305,12 @@ void LoadData(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq, ALuint size,
     if((access&AL_PRESERVE_DATA_BIT_SOFT))
     {
         /* Can only preserve data with the same format and alignment. */
-        if(ALBuf->mChannels != DstChannels || ALBuf->mType != DstType) UNLIKELY
-            return context->setError(AL_INVALID_VALUE, "Preserving data of mismatched format");
-        if(ALBuf->mBlockAlign != align) UNLIKELY
-            return context->setError(AL_INVALID_VALUE, "Preserving data of mismatched alignment");
-        if(ALBuf->mAmbiOrder != ambiorder) UNLIKELY
-            return context->setError(AL_INVALID_VALUE, "Preserving data of mismatched order");
+        if(ALBuf->mChannels != DstChannels || ALBuf->mType != DstType)
+            throw al::context_error{AL_INVALID_VALUE, "Preserving data of mismatched format"};
+        if(ALBuf->mBlockAlign != align)
+            throw al::context_error{AL_INVALID_VALUE, "Preserving data of mismatched alignment"};
+        if(ALBuf->mAmbiOrder != ambiorder)
+            throw al::context_error{AL_INVALID_VALUE, "Preserving data of mismatched order"};
     }
 
     /* Convert the size in bytes to blocks using the unpack block alignment. */
@@ -318,18 +319,18 @@ void LoadData(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq, ALuint size,
         ((DstType == FmtIMA4) ? (align-1)/2 + 4 :
         (DstType == FmtMSADPCM) ? (align-2)/2 + 7 :
         (align * BytesFromFmt(DstType)))};
-    if((size%BlockSize) != 0) UNLIKELY
-        return context->setError(AL_INVALID_VALUE,
+    if((size%BlockSize) != 0)
+        throw al::context_error{AL_INVALID_VALUE,
             "Data size %d is not a multiple of frame size %d (%d unpack alignment)",
-            size, BlockSize, align);
+            size, BlockSize, align};
     const ALuint blocks{size / BlockSize};
 
-    if(blocks > std::numeric_limits<ALsizei>::max()/align) UNLIKELY
-        return context->setError(AL_OUT_OF_MEMORY,
-            "Buffer size overflow, %d blocks x %d samples per block", blocks, align);
-    if(blocks > std::numeric_limits<size_t>::max()/BlockSize) UNLIKELY
-        return context->setError(AL_OUT_OF_MEMORY,
-            "Buffer size overflow, %d frames x %d bytes per frame", blocks, BlockSize);
+    if(blocks > std::numeric_limits<ALsizei>::max()/align)
+        throw al::context_error{AL_OUT_OF_MEMORY,
+            "Buffer size overflow, %d blocks x %d samples per block", blocks, align};
+    if(blocks > std::numeric_limits<size_t>::max()/BlockSize)
+        throw al::context_error{AL_OUT_OF_MEMORY,
+            "Buffer size overflow, %d frames x %d bytes per frame", blocks, BlockSize};
 
     const size_t newsize{static_cast<size_t>(blocks) * BlockSize};
 
@@ -338,8 +339,8 @@ void LoadData(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq, ALuint size,
     {
         ALCdevice &device = *context->mALDevice;
         if(!eax_x_ram_check_availability(device, *ALBuf, size))
-            return context->setError(AL_OUT_OF_MEMORY,
-                "Out of X-RAM memory (avail: %u, needed: %u)", device.eax_x_ram_free_size, size);
+            throw al::context_error{AL_OUT_OF_MEMORY,
+                "Out of X-RAM memory (avail: %u, needed: %u)", device.eax_x_ram_free_size, size};
     }
 #endif
 
@@ -391,22 +392,22 @@ void LoadData(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq, ALuint size,
 }
 
 /** Prepares the buffer to use the specified callback, using the specified format. */
-void PrepareCallback(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq,
+void PrepareCallback(ALCcontext *context [[maybe_unused]], ALbuffer *ALBuf, ALsizei freq,
     const FmtChannels DstChannels, const FmtType DstType, ALBUFFERCALLBACKTYPESOFT callback,
     void *userptr)
 {
-    if(ALBuf->ref.load(std::memory_order_relaxed) != 0 || ALBuf->MappedAccess != 0) UNLIKELY
-        return context->setError(AL_INVALID_OPERATION, "Modifying callback for in-use buffer %u",
-            ALBuf->id);
+    if(ALBuf->ref.load(std::memory_order_relaxed) != 0 || ALBuf->MappedAccess != 0)
+        throw al::context_error{AL_INVALID_OPERATION, "Modifying callback for in-use buffer %u",
+            ALBuf->id};
 
     const ALuint ambiorder{IsBFormat(DstChannels) ? ALBuf->UnpackAmbiOrder :
         (IsUHJ(DstChannels) ? 1 : 0)};
 
     const ALuint unpackalign{ALBuf->UnpackAlign};
     const ALuint align{SanitizeAlignment(DstType, unpackalign)};
-    if(align < 1) UNLIKELY
-        return context->setError(AL_INVALID_VALUE, "Invalid unpack alignment %u for %s samples",
-            unpackalign, NameFromFormat(DstType));
+    if(align < 1)
+        throw al::context_error{AL_INVALID_VALUE, "Invalid unpack alignment %u for %s samples",
+            unpackalign, NameFromFormat(DstType)};
 
     const ALuint BlockSize{ChannelsFromFmt(DstChannels, ambiorder) *
         ((DstType == FmtIMA4) ? (align-1)/2 + 4 :
@@ -448,18 +449,18 @@ void PrepareCallback(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq,
 }
 
 /** Prepares the buffer to use caller-specified storage. */
-void PrepareUserPtr(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq,
+void PrepareUserPtr(ALCcontext *context [[maybe_unused]], ALbuffer *ALBuf, ALsizei freq,
     const FmtChannels DstChannels, const FmtType DstType, std::byte *sdata, const ALuint sdatalen)
 {
-    if(ALBuf->ref.load(std::memory_order_relaxed) != 0 || ALBuf->MappedAccess != 0) UNLIKELY
-        return context->setError(AL_INVALID_OPERATION, "Modifying storage for in-use buffer %u",
-            ALBuf->id);
+    if(ALBuf->ref.load(std::memory_order_relaxed) != 0 || ALBuf->MappedAccess != 0)
+        throw al::context_error{AL_INVALID_OPERATION, "Modifying storage for in-use buffer %u",
+            ALBuf->id};
 
     const ALuint unpackalign{ALBuf->UnpackAlign};
     const ALuint align{SanitizeAlignment(DstType, unpackalign)};
-    if(align < 1) UNLIKELY
-        return context->setError(AL_INVALID_VALUE, "Invalid unpack alignment %u for %s samples",
-            unpackalign, NameFromFormat(DstType));
+    if(align < 1)
+        throw al::context_error{AL_INVALID_VALUE, "Invalid unpack alignment %u for %s samples",
+            unpackalign, NameFromFormat(DstType)};
 
     auto get_type_alignment = [](const FmtType type) noexcept -> ALuint
     {
@@ -482,8 +483,8 @@ void PrepareUserPtr(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq,
     };
     const auto typealign = get_type_alignment(DstType);
     if((reinterpret_cast<uintptr_t>(sdata) & (typealign-1)) != 0)
-        return context->setError(AL_INVALID_VALUE, "Pointer %p is misaligned for %s samples (%u)",
-            static_cast<void*>(sdata), NameFromFormat(DstType), typealign);
+        throw al::context_error{AL_INVALID_VALUE, "Pointer %p is misaligned for %s samples (%u)",
+            static_cast<void*>(sdata), NameFromFormat(DstType), typealign};
 
     const ALuint ambiorder{IsBFormat(DstChannels) ? ALBuf->UnpackAmbiOrder :
         (IsUHJ(DstChannels) ? 1 : 0)};
@@ -494,27 +495,27 @@ void PrepareUserPtr(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq,
         ((DstType == FmtIMA4) ? (align-1)/2 + 4 :
         (DstType == FmtMSADPCM) ? (align-2)/2 + 7 :
         (align * BytesFromFmt(DstType)))};
-    if((sdatalen%BlockSize) != 0) UNLIKELY
-        return context->setError(AL_INVALID_VALUE,
+    if((sdatalen%BlockSize) != 0)
+        throw al::context_error{AL_INVALID_VALUE,
             "Data size %u is not a multiple of frame size %u (%u unpack alignment)",
-            sdatalen, BlockSize, align);
+            sdatalen, BlockSize, align};
     const ALuint blocks{sdatalen / BlockSize};
 
-    if(blocks > std::numeric_limits<ALsizei>::max()/align) UNLIKELY
-        return context->setError(AL_OUT_OF_MEMORY,
-            "Buffer size overflow, %d blocks x %d samples per block", blocks, align);
-    if(blocks > std::numeric_limits<size_t>::max()/BlockSize) UNLIKELY
-        return context->setError(AL_OUT_OF_MEMORY,
-            "Buffer size overflow, %d frames x %d bytes per frame", blocks, BlockSize);
+    if(blocks > std::numeric_limits<ALsizei>::max()/align)
+        throw al::context_error{AL_OUT_OF_MEMORY,
+            "Buffer size overflow, %d blocks x %d samples per block", blocks, align};
+    if(blocks > std::numeric_limits<size_t>::max()/BlockSize)
+        throw al::context_error{AL_OUT_OF_MEMORY,
+            "Buffer size overflow, %d frames x %d bytes per frame", blocks, BlockSize};
 
 #ifdef ALSOFT_EAX
     if(ALBuf->eax_x_ram_mode == EaxStorage::Hardware)
     {
         ALCdevice &device = *context->mALDevice;
         if(!eax_x_ram_check_availability(device, *ALBuf, sdatalen))
-            return context->setError(AL_OUT_OF_MEMORY,
+            throw al::context_error{AL_OUT_OF_MEMORY,
                 "Out of X-RAM memory (avail: %u, needed: %u)", device.eax_x_ram_free_size,
-                sdatalen);
+                sdatalen};
     }
 #endif
 
@@ -549,196 +550,174 @@ void PrepareUserPtr(ALCcontext *context, ALbuffer *ALBuf, ALsizei freq,
 
 
 struct DecompResult { FmtChannels channels; FmtType type; };
-std::optional<DecompResult> DecomposeUserFormat(ALenum format)
+auto DecomposeUserFormat(ALenum format) noexcept -> std::optional<DecompResult>
 {
     struct FormatMap {
         ALenum format;
-        FmtChannels channels;
-        FmtType type;
+        DecompResult result;
     };
     static constexpr std::array UserFmtList{
-        FormatMap{AL_FORMAT_MONO8,             FmtMono, FmtUByte  },
-        FormatMap{AL_FORMAT_MONO16,            FmtMono, FmtShort  },
-        FormatMap{AL_FORMAT_MONO_I32,          FmtMono, FmtInt    },
-        FormatMap{AL_FORMAT_MONO_FLOAT32,      FmtMono, FmtFloat  },
-        FormatMap{AL_FORMAT_MONO_DOUBLE_EXT,   FmtMono, FmtDouble },
-        FormatMap{AL_FORMAT_MONO_IMA4,         FmtMono, FmtIMA4   },
-        FormatMap{AL_FORMAT_MONO_MSADPCM_SOFT, FmtMono, FmtMSADPCM},
-        FormatMap{AL_FORMAT_MONO_MULAW,        FmtMono, FmtMulaw  },
-        FormatMap{AL_FORMAT_MONO_ALAW_EXT,     FmtMono, FmtAlaw   },
+        FormatMap{AL_FORMAT_MONO8,             {FmtMono, FmtUByte}  },
+        FormatMap{AL_FORMAT_MONO16,            {FmtMono, FmtShort}  },
+        FormatMap{AL_FORMAT_MONO_I32,          {FmtMono, FmtInt}    },
+        FormatMap{AL_FORMAT_MONO_FLOAT32,      {FmtMono, FmtFloat}  },
+        FormatMap{AL_FORMAT_MONO_DOUBLE_EXT,   {FmtMono, FmtDouble} },
+        FormatMap{AL_FORMAT_MONO_IMA4,         {FmtMono, FmtIMA4}   },
+        FormatMap{AL_FORMAT_MONO_MSADPCM_SOFT, {FmtMono, FmtMSADPCM}},
+        FormatMap{AL_FORMAT_MONO_MULAW,        {FmtMono, FmtMulaw}  },
+        FormatMap{AL_FORMAT_MONO_ALAW_EXT,     {FmtMono, FmtAlaw}   },
 
-        FormatMap{AL_FORMAT_STEREO8,             FmtStereo, FmtUByte  },
-        FormatMap{AL_FORMAT_STEREO16,            FmtStereo, FmtShort  },
-        FormatMap{AL_FORMAT_STEREO_I32,          FmtStereo, FmtInt    },
-        FormatMap{AL_FORMAT_STEREO_FLOAT32,      FmtStereo, FmtFloat  },
-        FormatMap{AL_FORMAT_STEREO_DOUBLE_EXT,   FmtStereo, FmtDouble },
-        FormatMap{AL_FORMAT_STEREO_IMA4,         FmtStereo, FmtIMA4   },
-        FormatMap{AL_FORMAT_STEREO_MSADPCM_SOFT, FmtStereo, FmtMSADPCM},
-        FormatMap{AL_FORMAT_STEREO_MULAW,        FmtStereo, FmtMulaw  },
-        FormatMap{AL_FORMAT_STEREO_ALAW_EXT,     FmtStereo, FmtAlaw   },
+        FormatMap{AL_FORMAT_STEREO8,             {FmtStereo, FmtUByte}  },
+        FormatMap{AL_FORMAT_STEREO16,            {FmtStereo, FmtShort}  },
+        FormatMap{AL_FORMAT_STEREO_I32,          {FmtStereo, FmtInt}    },
+        FormatMap{AL_FORMAT_STEREO_FLOAT32,      {FmtStereo, FmtFloat}  },
+        FormatMap{AL_FORMAT_STEREO_DOUBLE_EXT,   {FmtStereo, FmtDouble} },
+        FormatMap{AL_FORMAT_STEREO_IMA4,         {FmtStereo, FmtIMA4}   },
+        FormatMap{AL_FORMAT_STEREO_MSADPCM_SOFT, {FmtStereo, FmtMSADPCM}},
+        FormatMap{AL_FORMAT_STEREO_MULAW,        {FmtStereo, FmtMulaw}  },
+        FormatMap{AL_FORMAT_STEREO_ALAW_EXT,     {FmtStereo, FmtAlaw}   },
 
-        FormatMap{AL_FORMAT_REAR8,        FmtRear, FmtUByte},
-        FormatMap{AL_FORMAT_REAR16,       FmtRear, FmtShort},
-        FormatMap{AL_FORMAT_REAR32,       FmtRear, FmtFloat},
-        FormatMap{AL_FORMAT_REAR_I32,     FmtRear, FmtInt  },
-        FormatMap{AL_FORMAT_REAR_FLOAT32, FmtRear, FmtFloat},
-        FormatMap{AL_FORMAT_REAR_MULAW,   FmtRear, FmtMulaw},
+        FormatMap{AL_FORMAT_REAR8,        {FmtRear, FmtUByte}},
+        FormatMap{AL_FORMAT_REAR16,       {FmtRear, FmtShort}},
+        FormatMap{AL_FORMAT_REAR32,       {FmtRear, FmtFloat}},
+        FormatMap{AL_FORMAT_REAR_I32,     {FmtRear, FmtInt}  },
+        FormatMap{AL_FORMAT_REAR_FLOAT32, {FmtRear, FmtFloat}},
+        FormatMap{AL_FORMAT_REAR_MULAW,   {FmtRear, FmtMulaw}},
 
-        FormatMap{AL_FORMAT_QUAD8_LOKI,  FmtQuad, FmtUByte},
-        FormatMap{AL_FORMAT_QUAD16_LOKI, FmtQuad, FmtShort},
+        FormatMap{AL_FORMAT_QUAD8_LOKI,  {FmtQuad, FmtUByte}},
+        FormatMap{AL_FORMAT_QUAD16_LOKI, {FmtQuad, FmtShort}},
 
-        FormatMap{AL_FORMAT_QUAD8,        FmtQuad, FmtUByte},
-        FormatMap{AL_FORMAT_QUAD16,       FmtQuad, FmtShort},
-        FormatMap{AL_FORMAT_QUAD32,       FmtQuad, FmtFloat},
-        FormatMap{AL_FORMAT_QUAD_I32,     FmtQuad, FmtInt  },
-        FormatMap{AL_FORMAT_QUAD_FLOAT32, FmtQuad, FmtFloat},
-        FormatMap{AL_FORMAT_QUAD_MULAW,   FmtQuad, FmtMulaw},
+        FormatMap{AL_FORMAT_QUAD8,        {FmtQuad, FmtUByte}},
+        FormatMap{AL_FORMAT_QUAD16,       {FmtQuad, FmtShort}},
+        FormatMap{AL_FORMAT_QUAD32,       {FmtQuad, FmtFloat}},
+        FormatMap{AL_FORMAT_QUAD_I32,     {FmtQuad, FmtInt}  },
+        FormatMap{AL_FORMAT_QUAD_FLOAT32, {FmtQuad, FmtFloat}},
+        FormatMap{AL_FORMAT_QUAD_MULAW,   {FmtQuad, FmtMulaw}},
 
-        FormatMap{AL_FORMAT_51CHN8,        FmtX51, FmtUByte},
-        FormatMap{AL_FORMAT_51CHN16,       FmtX51, FmtShort},
-        FormatMap{AL_FORMAT_51CHN32,       FmtX51, FmtFloat},
-        FormatMap{AL_FORMAT_51CHN_I32,     FmtX51, FmtInt  },
-        FormatMap{AL_FORMAT_51CHN_FLOAT32, FmtX51, FmtFloat},
-        FormatMap{AL_FORMAT_51CHN_MULAW,   FmtX51, FmtMulaw},
+        FormatMap{AL_FORMAT_51CHN8,        {FmtX51, FmtUByte}},
+        FormatMap{AL_FORMAT_51CHN16,       {FmtX51, FmtShort}},
+        FormatMap{AL_FORMAT_51CHN32,       {FmtX51, FmtFloat}},
+        FormatMap{AL_FORMAT_51CHN_I32,     {FmtX51, FmtInt}  },
+        FormatMap{AL_FORMAT_51CHN_FLOAT32, {FmtX51, FmtFloat}},
+        FormatMap{AL_FORMAT_51CHN_MULAW,   {FmtX51, FmtMulaw}},
 
-        FormatMap{AL_FORMAT_61CHN8,        FmtX61, FmtUByte},
-        FormatMap{AL_FORMAT_61CHN16,       FmtX61, FmtShort},
-        FormatMap{AL_FORMAT_61CHN32,       FmtX61, FmtFloat},
-        FormatMap{AL_FORMAT_61CHN_I32,     FmtX61, FmtInt  },
-        FormatMap{AL_FORMAT_61CHN_FLOAT32, FmtX61, FmtFloat},
-        FormatMap{AL_FORMAT_61CHN_MULAW,   FmtX61, FmtMulaw},
+        FormatMap{AL_FORMAT_61CHN8,        {FmtX61, FmtUByte}},
+        FormatMap{AL_FORMAT_61CHN16,       {FmtX61, FmtShort}},
+        FormatMap{AL_FORMAT_61CHN32,       {FmtX61, FmtFloat}},
+        FormatMap{AL_FORMAT_61CHN_I32,     {FmtX61, FmtInt}  },
+        FormatMap{AL_FORMAT_61CHN_FLOAT32, {FmtX61, FmtFloat}},
+        FormatMap{AL_FORMAT_61CHN_MULAW,   {FmtX61, FmtMulaw}},
 
-        FormatMap{AL_FORMAT_71CHN8,        FmtX71, FmtUByte},
-        FormatMap{AL_FORMAT_71CHN16,       FmtX71, FmtShort},
-        FormatMap{AL_FORMAT_71CHN32,       FmtX71, FmtFloat},
-        FormatMap{AL_FORMAT_71CHN_I32,     FmtX71, FmtInt  },
-        FormatMap{AL_FORMAT_71CHN_FLOAT32, FmtX71, FmtFloat},
-        FormatMap{AL_FORMAT_71CHN_MULAW,   FmtX71, FmtMulaw},
+        FormatMap{AL_FORMAT_71CHN8,        {FmtX71, FmtUByte}},
+        FormatMap{AL_FORMAT_71CHN16,       {FmtX71, FmtShort}},
+        FormatMap{AL_FORMAT_71CHN32,       {FmtX71, FmtFloat}},
+        FormatMap{AL_FORMAT_71CHN_I32,     {FmtX71, FmtInt}  },
+        FormatMap{AL_FORMAT_71CHN_FLOAT32, {FmtX71, FmtFloat}},
+        FormatMap{AL_FORMAT_71CHN_MULAW,   {FmtX71, FmtMulaw}},
 
-        FormatMap{AL_FORMAT_BFORMAT2D_8,       FmtBFormat2D, FmtUByte},
-        FormatMap{AL_FORMAT_BFORMAT2D_16,      FmtBFormat2D, FmtShort},
-        FormatMap{AL_FORMAT_BFORMAT2D_FLOAT32, FmtBFormat2D, FmtFloat},
-        FormatMap{AL_FORMAT_BFORMAT2D_MULAW,   FmtBFormat2D, FmtMulaw},
+        FormatMap{AL_FORMAT_BFORMAT2D_8,       {FmtBFormat2D, FmtUByte}},
+        FormatMap{AL_FORMAT_BFORMAT2D_16,      {FmtBFormat2D, FmtShort}},
+        FormatMap{AL_FORMAT_BFORMAT2D_FLOAT32, {FmtBFormat2D, FmtFloat}},
+        FormatMap{AL_FORMAT_BFORMAT2D_MULAW,   {FmtBFormat2D, FmtMulaw}},
 
-        FormatMap{AL_FORMAT_BFORMAT3D_8,       FmtBFormat3D, FmtUByte},
-        FormatMap{AL_FORMAT_BFORMAT3D_16,      FmtBFormat3D, FmtShort},
-        FormatMap{AL_FORMAT_BFORMAT3D_FLOAT32, FmtBFormat3D, FmtFloat},
-        FormatMap{AL_FORMAT_BFORMAT3D_MULAW,   FmtBFormat3D, FmtMulaw},
+        FormatMap{AL_FORMAT_BFORMAT3D_8,       {FmtBFormat3D, FmtUByte}},
+        FormatMap{AL_FORMAT_BFORMAT3D_16,      {FmtBFormat3D, FmtShort}},
+        FormatMap{AL_FORMAT_BFORMAT3D_FLOAT32, {FmtBFormat3D, FmtFloat}},
+        FormatMap{AL_FORMAT_BFORMAT3D_MULAW,   {FmtBFormat3D, FmtMulaw}},
 
-        FormatMap{AL_FORMAT_UHJ2CHN8_SOFT,        FmtUHJ2, FmtUByte  },
-        FormatMap{AL_FORMAT_UHJ2CHN16_SOFT,       FmtUHJ2, FmtShort  },
-        FormatMap{AL_FORMAT_UHJ2CHN_I32,          FmtUHJ2, FmtInt    },
-        FormatMap{AL_FORMAT_UHJ2CHN_FLOAT32_SOFT, FmtUHJ2, FmtFloat  },
-        FormatMap{AL_FORMAT_UHJ2CHN_MULAW_SOFT,   FmtUHJ2, FmtMulaw  },
-        FormatMap{AL_FORMAT_UHJ2CHN_ALAW_SOFT,    FmtUHJ2, FmtAlaw   },
-        FormatMap{AL_FORMAT_UHJ2CHN_IMA4_SOFT,    FmtUHJ2, FmtIMA4   },
-        FormatMap{AL_FORMAT_UHJ2CHN_MSADPCM_SOFT, FmtUHJ2, FmtMSADPCM},
+        FormatMap{AL_FORMAT_UHJ2CHN8_SOFT,        {FmtUHJ2, FmtUByte}  },
+        FormatMap{AL_FORMAT_UHJ2CHN16_SOFT,       {FmtUHJ2, FmtShort}  },
+        FormatMap{AL_FORMAT_UHJ2CHN_I32_SOFT,     {FmtUHJ2, FmtInt}    },
+        FormatMap{AL_FORMAT_UHJ2CHN_FLOAT32_SOFT, {FmtUHJ2, FmtFloat}  },
+        FormatMap{AL_FORMAT_UHJ2CHN_MULAW_SOFT,   {FmtUHJ2, FmtMulaw}  },
+        FormatMap{AL_FORMAT_UHJ2CHN_ALAW_SOFT,    {FmtUHJ2, FmtAlaw}   },
+        FormatMap{AL_FORMAT_UHJ2CHN_IMA4_SOFT,    {FmtUHJ2, FmtIMA4}   },
+        FormatMap{AL_FORMAT_UHJ2CHN_MSADPCM_SOFT, {FmtUHJ2, FmtMSADPCM}},
 
-        FormatMap{AL_FORMAT_UHJ3CHN8_SOFT,        FmtUHJ3, FmtUByte},
-        FormatMap{AL_FORMAT_UHJ3CHN16_SOFT,       FmtUHJ3, FmtShort},
-        FormatMap{AL_FORMAT_UHJ3CHN_I32,          FmtUHJ3, FmtInt  },
-        FormatMap{AL_FORMAT_UHJ3CHN_FLOAT32_SOFT, FmtUHJ3, FmtFloat},
-        FormatMap{AL_FORMAT_UHJ3CHN_MULAW_SOFT,   FmtUHJ3, FmtMulaw},
-        FormatMap{AL_FORMAT_UHJ3CHN_ALAW_SOFT,    FmtUHJ3, FmtAlaw },
+        FormatMap{AL_FORMAT_UHJ3CHN8_SOFT,        {FmtUHJ3, FmtUByte}},
+        FormatMap{AL_FORMAT_UHJ3CHN16_SOFT,       {FmtUHJ3, FmtShort}},
+        FormatMap{AL_FORMAT_UHJ3CHN_I32_SOFT,     {FmtUHJ3, FmtInt}  },
+        FormatMap{AL_FORMAT_UHJ3CHN_FLOAT32_SOFT, {FmtUHJ3, FmtFloat}},
+        FormatMap{AL_FORMAT_UHJ3CHN_MULAW_SOFT,   {FmtUHJ3, FmtMulaw}},
+        FormatMap{AL_FORMAT_UHJ3CHN_ALAW_SOFT,    {FmtUHJ3, FmtAlaw} },
 
-        FormatMap{AL_FORMAT_UHJ4CHN8_SOFT,        FmtUHJ4, FmtUByte},
-        FormatMap{AL_FORMAT_UHJ4CHN16_SOFT,       FmtUHJ4, FmtShort},
-        FormatMap{AL_FORMAT_UHJ4CHN_I32,          FmtUHJ4, FmtInt  },
-        FormatMap{AL_FORMAT_UHJ4CHN_FLOAT32_SOFT, FmtUHJ4, FmtFloat},
-        FormatMap{AL_FORMAT_UHJ4CHN_MULAW_SOFT,   FmtUHJ4, FmtMulaw},
-        FormatMap{AL_FORMAT_UHJ4CHN_ALAW_SOFT,    FmtUHJ4, FmtAlaw },
+        FormatMap{AL_FORMAT_UHJ4CHN8_SOFT,        {FmtUHJ4, FmtUByte}},
+        FormatMap{AL_FORMAT_UHJ4CHN16_SOFT,       {FmtUHJ4, FmtShort}},
+        FormatMap{AL_FORMAT_UHJ4CHN_I32_SOFT,     {FmtUHJ4, FmtInt}  },
+        FormatMap{AL_FORMAT_UHJ4CHN_FLOAT32_SOFT, {FmtUHJ4, FmtFloat}},
+        FormatMap{AL_FORMAT_UHJ4CHN_MULAW_SOFT,   {FmtUHJ4, FmtMulaw}},
+        FormatMap{AL_FORMAT_UHJ4CHN_ALAW_SOFT,    {FmtUHJ4, FmtAlaw} },
     };
 
-    for(const auto &fmt : UserFmtList)
-    {
-        if(fmt.format == format)
-            return DecompResult{fmt.channels, fmt.type};
-    }
+    auto iter = std::find_if(UserFmtList.cbegin(), UserFmtList.cend(),
+        [format](const FormatMap &fmt) noexcept { return fmt.format == format; });
+    if(iter != UserFmtList.cend())
+        return iter->result;
     return std::nullopt;
 }
 
 } // namespace
 
 
-AL_API DECL_FUNC2(void, alGenBuffers, ALsizei, ALuint*)
+AL_API DECL_FUNC2(void, alGenBuffers, ALsizei,n, ALuint*,buffers)
 FORCE_ALIGN void AL_APIENTRY alGenBuffersDirect(ALCcontext *context, ALsizei n, ALuint *buffers) noexcept
-{
-    if(n < 0) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "Generating %d buffers", n);
+try {
+    if(n < 0)
+        throw al::context_error{AL_INVALID_VALUE, "Generating %d buffers", n};
     if(n <= 0) UNLIKELY return;
 
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
-    if(!EnsureBuffers(device, static_cast<ALuint>(n)))
-    {
-        context->setError(AL_OUT_OF_MEMORY, "Failed to allocate %d buffer%s", n, (n==1)?"":"s");
-        return;
-    }
 
-    if(n == 1) LIKELY
-    {
-        /* Special handling for the easy and normal case. */
-        *buffers = AllocBuffer(device)->id;
-    }
-    else
-    {
-        /* Store the allocated buffer IDs in a separate local list, to avoid
-         * modifying the user storage in case of failure.
-         */
-        std::vector<ALuint> ids;
-        ids.reserve(static_cast<ALuint>(n));
-        do {
-            ALbuffer *buffer{AllocBuffer(device)};
-            ids.emplace_back(buffer->id);
-        } while(--n);
-        const al::span bids{buffers, static_cast<ALuint>(n)};
-        std::copy(ids.cbegin(), ids.cend(), bids.begin());
-    }
+    const al::span bids{buffers, static_cast<ALuint>(n)};
+    if(!EnsureBuffers(device, bids.size()))
+        throw al::context_error{AL_OUT_OF_MEMORY, "Failed to allocate %d buffer%s", n,
+            (n == 1) ? "" : "s"};
+
+    std::generate(bids.begin(), bids.end(), [device]{ return AllocBuffer(device)->id; });
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNC2(void, alDeleteBuffers, ALsizei, const ALuint*)
+AL_API DECL_FUNC2(void, alDeleteBuffers, ALsizei,n, const ALuint*,buffers)
 FORCE_ALIGN void AL_APIENTRY alDeleteBuffersDirect(ALCcontext *context, ALsizei n,
     const ALuint *buffers) noexcept
-{
-    if(n < 0) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "Deleting %d buffers", n);
+try {
+    if(n < 0)
+        throw al::context_error{AL_INVALID_VALUE, "Deleting %d buffers", n};
     if(n <= 0) UNLIKELY return;
 
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     /* First try to find any buffers that are invalid or in-use. */
-    auto validate_buffer = [device, &context](const ALuint bid) -> bool
+    auto validate_buffer = [device](const ALuint bid)
     {
-        if(!bid) return true;
+        if(!bid) return;
         ALbuffer *ALBuf{LookupBuffer(device, bid)};
-        if(!ALBuf) UNLIKELY
-        {
-            context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", bid);
-            return false;
-        }
-        if(ALBuf->ref.load(std::memory_order_relaxed) != 0) UNLIKELY
-        {
-            context->setError(AL_INVALID_OPERATION, "Deleting in-use buffer %u", bid);
-            return false;
-        }
-        return true;
+        if(!ALBuf)
+            throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", bid};
+        if(ALBuf->ref.load(std::memory_order_relaxed) != 0)
+            throw al::context_error{AL_INVALID_OPERATION, "Deleting in-use buffer %u", bid};
     };
 
     const al::span bids{buffers, static_cast<ALuint>(n)};
-    auto invbuf = std::find_if_not(bids.begin(), bids.end(), validate_buffer);
-    if(invbuf != bids.end()) UNLIKELY return;
+    std::for_each(bids.begin(), bids.end(), validate_buffer);
 
     /* All good. Delete non-0 buffer IDs. */
     auto delete_buffer = [device](const ALuint bid) -> void
     {
-        ALbuffer *buffer{bid ? LookupBuffer(device, bid) : nullptr};
-        if(buffer) FreeBuffer(device, buffer);
+        if(ALbuffer *buffer{bid ? LookupBuffer(device, bid) : nullptr})
+            FreeBuffer(device, buffer);
     };
     std::for_each(bids.begin(), bids.end(), delete_buffer);
 }
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
+}
 
-AL_API DECL_FUNC1(ALboolean, alIsBuffer, ALuint)
+AL_API DECL_FUNC1(ALboolean, alIsBuffer, ALuint,buffer)
 FORCE_ALIGN ALboolean AL_APIENTRY alIsBufferDirect(ALCcontext *context, ALuint buffer) noexcept
 {
     ALCdevice *device{context->mALDevice.get()};
@@ -759,193 +738,193 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
 FORCE_ALIGN void AL_APIENTRY alBufferDataDirect(ALCcontext *context, ALuint buffer, ALenum format, const ALvoid *data, ALsizei size, ALsizei freq) noexcept
 { alBufferStorageDirectSOFT(context, buffer, format, data, size, freq, 0); }
 
-AL_API DECL_FUNCEXT6(void, alBufferStorage,SOFT, ALuint, ALenum, const ALvoid*, ALsizei, ALsizei, ALbitfieldSOFT)
+AL_API DECL_FUNCEXT6(void, alBufferStorage,SOFT, ALuint,buffer, ALenum,format, const ALvoid*,data, ALsizei,size, ALsizei,freq, ALbitfieldSOFT,flags)
 FORCE_ALIGN void AL_APIENTRY alBufferStorageDirectSOFT(ALCcontext *context, ALuint buffer,
     ALenum format, const ALvoid *data, ALsizei size, ALsizei freq, ALbitfieldSOFT flags) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(size < 0) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "Negative storage size %d", size);
-    else if(freq < 1) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "Invalid sample rate %d", freq);
-    else if((flags&INVALID_STORAGE_MASK) != 0) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "Invalid storage flags 0x%x",
-            flags&INVALID_STORAGE_MASK);
-    else if((flags&AL_MAP_PERSISTENT_BIT_SOFT) && !(flags&MAP_READ_WRITE_FLAGS)) UNLIKELY
-        context->setError(AL_INVALID_VALUE,
-            "Declaring persistently mapped storage without read or write access");
-    else
-    {
-        auto usrfmt = DecomposeUserFormat(format);
-        if(!usrfmt) UNLIKELY
-            context->setError(AL_INVALID_ENUM, "Invalid format 0x%04x", format);
-        else
-        {
-            LoadData(context, albuf, freq, static_cast<ALuint>(size), usrfmt->channels,
-                usrfmt->type, static_cast<const std::byte*>(data), flags);
-        }
-    }
-}
-
-DECL_FUNC5(void, alBufferDataStatic, ALuint, ALenum, ALvoid*, ALsizei, ALsizei)
-FORCE_ALIGN void AL_APIENTRY alBufferDataStaticDirect(ALCcontext *context, const ALuint buffer,
-    ALenum format, ALvoid *data, ALsizei size, ALsizei freq) noexcept
-{
-    ALCdevice *device{context->mALDevice.get()};
-    std::lock_guard<std::mutex> buflock{device->BufferLock};
-
-    ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        return context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    if(size < 0) UNLIKELY
-        return context->setError(AL_INVALID_VALUE, "Negative storage size %d", size);
-    if(freq < 1) UNLIKELY
-        return context->setError(AL_INVALID_VALUE, "Invalid sample rate %d", freq);
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(size < 0)
+        throw al::context_error{AL_INVALID_VALUE, "Negative storage size %d", size};
+    if(freq < 1)
+        throw al::context_error{AL_INVALID_VALUE, "Invalid sample rate %d", freq};
+    if((flags&INVALID_STORAGE_MASK) != 0)
+        throw al::context_error{AL_INVALID_VALUE, "Invalid storage flags 0x%x",
+            flags&INVALID_STORAGE_MASK};
+    if((flags&AL_MAP_PERSISTENT_BIT_SOFT) && !(flags&MAP_READ_WRITE_FLAGS))
+        throw al::context_error{AL_INVALID_VALUE,
+            "Declaring persistently mapped storage without read or write access"};
 
     auto usrfmt = DecomposeUserFormat(format);
-    if(!usrfmt) UNLIKELY
-        return context->setError(AL_INVALID_ENUM, "Invalid format 0x%04x", format);
+    if(!usrfmt)
+        throw al::context_error{AL_INVALID_ENUM, "Invalid format 0x%04x", format};
+
+    LoadData(context, albuf, freq, static_cast<ALuint>(size), usrfmt->channels, usrfmt->type,
+        static_cast<const std::byte*>(data), flags);
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
+}
+
+FORCE_ALIGN DECL_FUNC5(void, alBufferDataStatic, ALuint,buffer, ALenum,format, ALvoid*,data, ALsizei,size, ALsizei,freq)
+FORCE_ALIGN void AL_APIENTRY alBufferDataStaticDirect(ALCcontext *context, const ALuint buffer,
+    ALenum format, ALvoid *data, ALsizei size, ALsizei freq) noexcept
+try {
+    ALCdevice *device{context->mALDevice.get()};
+    std::lock_guard<std::mutex> buflock{device->BufferLock};
+
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(size < 0)
+        throw al::context_error{AL_INVALID_VALUE, "Negative storage size %d", size};
+    if(freq < 1)
+        throw al::context_error{AL_INVALID_VALUE, "Invalid sample rate %d", freq};
+
+    auto usrfmt = DecomposeUserFormat(format);
+    if(!usrfmt)
+        throw al::context_error{AL_INVALID_ENUM, "Invalid format 0x%04x", format};
 
     PrepareUserPtr(context, albuf, freq, usrfmt->channels, usrfmt->type,
         static_cast<std::byte*>(data), static_cast<ALuint>(size));
 }
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
+}
 
-AL_API DECL_FUNCEXT4(void*, alMapBuffer,SOFT, ALuint, ALsizei, ALsizei, ALbitfieldSOFT)
+AL_API DECL_FUNCEXT4(void*, alMapBuffer,SOFT, ALuint,buffer, ALsizei,offset, ALsizei,length, ALbitfieldSOFT,access)
 FORCE_ALIGN void* AL_APIENTRY alMapBufferDirectSOFT(ALCcontext *context, ALuint buffer,
     ALsizei offset, ALsizei length, ALbitfieldSOFT access) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if((access&INVALID_MAP_FLAGS) != 0) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "Invalid map flags 0x%x", access&INVALID_MAP_FLAGS);
-    else if(!(access&MAP_READ_WRITE_FLAGS)) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "Mapping buffer %u without read or write access",
-            buffer);
-    else
-    {
-        ALbitfieldSOFT unavailable = (albuf->Access^access) & access;
-        if(albuf->ref.load(std::memory_order_relaxed) != 0
-            && !(access&AL_MAP_PERSISTENT_BIT_SOFT)) UNLIKELY
-            context->setError(AL_INVALID_OPERATION,
-                "Mapping in-use buffer %u without persistent mapping", buffer);
-        else if(albuf->MappedAccess != 0) UNLIKELY
-            context->setError(AL_INVALID_OPERATION, "Mapping already-mapped buffer %u", buffer);
-        else if((unavailable&AL_MAP_READ_BIT_SOFT)) UNLIKELY
-            context->setError(AL_INVALID_VALUE,
-                "Mapping buffer %u for reading without read access", buffer);
-        else if((unavailable&AL_MAP_WRITE_BIT_SOFT)) UNLIKELY
-            context->setError(AL_INVALID_VALUE,
-                "Mapping buffer %u for writing without write access", buffer);
-        else if((unavailable&AL_MAP_PERSISTENT_BIT_SOFT)) UNLIKELY
-            context->setError(AL_INVALID_VALUE,
-                "Mapping buffer %u persistently without persistent access", buffer);
-        else if(offset < 0 || length <= 0
-            || static_cast<ALuint>(offset) >= albuf->OriginalSize
-            || static_cast<ALuint>(length) > albuf->OriginalSize - static_cast<ALuint>(offset))
-            UNLIKELY
-            context->setError(AL_INVALID_VALUE, "Mapping invalid range %d+%d for buffer %u",
-                offset, length, buffer);
-        else
-        {
-            void *retval{albuf->mData.data() + offset};
-            albuf->MappedAccess = access;
-            albuf->MappedOffset = offset;
-            albuf->MappedSize = length;
-            return retval;
-        }
-    }
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if((access&INVALID_MAP_FLAGS) != 0)
+        throw al::context_error{AL_INVALID_VALUE, "Invalid map flags 0x%x",
+            access&INVALID_MAP_FLAGS};
+    if(!(access&MAP_READ_WRITE_FLAGS))
+        throw al::context_error{AL_INVALID_VALUE, "Mapping buffer %u without read or write access",
+            buffer};
 
+    const ALbitfieldSOFT unavailable{(albuf->Access^access) & access};
+    if(albuf->ref.load(std::memory_order_relaxed) != 0 && !(access&AL_MAP_PERSISTENT_BIT_SOFT))
+        throw al::context_error{AL_INVALID_OPERATION,
+            "Mapping in-use buffer %u without persistent mapping", buffer};
+    if(albuf->MappedAccess != 0)
+        throw al::context_error{AL_INVALID_OPERATION, "Mapping already-mapped buffer %u", buffer};
+    if((unavailable&AL_MAP_READ_BIT_SOFT))
+        throw al::context_error{AL_INVALID_VALUE,
+            "Mapping buffer %u for reading without read access", buffer};
+    if((unavailable&AL_MAP_WRITE_BIT_SOFT))
+        throw al::context_error{AL_INVALID_VALUE,
+            "Mapping buffer %u for writing without write access", buffer};
+    if((unavailable&AL_MAP_PERSISTENT_BIT_SOFT))
+        throw al::context_error{AL_INVALID_VALUE,
+            "Mapping buffer %u persistently without persistent access", buffer};
+    if(offset < 0 || length <= 0 || static_cast<ALuint>(offset) >= albuf->OriginalSize
+        || static_cast<ALuint>(length) > albuf->OriginalSize - static_cast<ALuint>(offset))
+        throw al::context_error{AL_INVALID_VALUE, "Mapping invalid range %d+%d for buffer %u",
+            offset, length, buffer};
+
+    void *retval{albuf->mData.data() + offset};
+    albuf->MappedAccess = access;
+    albuf->MappedOffset = offset;
+    albuf->MappedSize = length;
+    return retval;
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
     return nullptr;
 }
 
-AL_API DECL_FUNCEXT1(void, alUnmapBuffer,SOFT, ALuint)
+AL_API DECL_FUNCEXT1(void, alUnmapBuffer,SOFT, ALuint,buffer)
 FORCE_ALIGN void AL_APIENTRY alUnmapBufferDirectSOFT(ALCcontext *context, ALuint buffer) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(albuf->MappedAccess == 0) UNLIKELY
-        context->setError(AL_INVALID_OPERATION, "Unmapping unmapped buffer %u", buffer);
-    else
-    {
-        albuf->MappedAccess = 0;
-        albuf->MappedOffset = 0;
-        albuf->MappedSize = 0;
-    }
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(albuf->MappedAccess == 0)
+        throw al::context_error{AL_INVALID_OPERATION, "Unmapping unmapped buffer %u", buffer};
+
+    albuf->MappedAccess = 0;
+    albuf->MappedOffset = 0;
+    albuf->MappedSize = 0;
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNCEXT3(void, alFlushMappedBuffer,SOFT, ALuint, ALsizei, ALsizei)
+AL_API DECL_FUNCEXT3(void, alFlushMappedBuffer,SOFT, ALuint,buffer, ALsizei,offset, ALsizei,length)
 FORCE_ALIGN void AL_APIENTRY alFlushMappedBufferDirectSOFT(ALCcontext *context, ALuint buffer,
     ALsizei offset, ALsizei length) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(!(albuf->MappedAccess&AL_MAP_WRITE_BIT_SOFT)) UNLIKELY
-        context->setError(AL_INVALID_OPERATION, "Flushing buffer %u while not mapped for writing",
-            buffer);
-    else if(offset < albuf->MappedOffset || length <= 0
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(!(albuf->MappedAccess&AL_MAP_WRITE_BIT_SOFT))
+        throw al::context_error{AL_INVALID_OPERATION,
+            "Flushing buffer %u while not mapped for writing", buffer};
+    if(offset < albuf->MappedOffset || length <= 0
         || offset >= albuf->MappedOffset+albuf->MappedSize
-        || length > albuf->MappedOffset+albuf->MappedSize-offset) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "Flushing invalid range %d+%d on buffer %u", offset,
-            length, buffer);
-    else
-    {
-        /* FIXME: Need to use some method of double-buffering for the mixer and
-         * app to hold separate memory, which can be safely transferred
-         * asynchronously. Currently we just say the app shouldn't write where
-         * OpenAL's reading, and hope for the best...
-         */
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-    }
+        || length > albuf->MappedOffset+albuf->MappedSize-offset)
+        throw al::context_error{AL_INVALID_VALUE, "Flushing invalid range %d+%d on buffer %u",
+            offset, length, buffer};
+
+    /* FIXME: Need to use some method of double-buffering for the mixer and app
+     * to hold separate memory, which can be safely transferred asynchronously.
+     * Currently we just say the app shouldn't write where OpenAL's reading,
+     * and hope for the best...
+     */
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNCEXT5(void, alBufferSubData,SOFT, ALuint, ALenum, const ALvoid*, ALsizei, ALsizei)
+AL_API DECL_FUNCEXT5(void, alBufferSubData,SOFT, ALuint,buffer, ALenum,format, const ALvoid*,data, ALsizei,offset, ALsizei,length)
 FORCE_ALIGN void AL_APIENTRY alBufferSubDataDirectSOFT(ALCcontext *context, ALuint buffer,
     ALenum format, const ALvoid *data, ALsizei offset, ALsizei length) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        return context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
 
     auto usrfmt = DecomposeUserFormat(format);
-    if(!usrfmt) UNLIKELY
-        return context->setError(AL_INVALID_ENUM, "Invalid format 0x%04x", format);
+    if(!usrfmt)
+        throw al::context_error{AL_INVALID_ENUM, "Invalid format 0x%04x", format};
 
     const ALuint unpack_align{albuf->UnpackAlign};
     const ALuint align{SanitizeAlignment(usrfmt->type, unpack_align)};
-    if(align < 1) UNLIKELY
-        return context->setError(AL_INVALID_VALUE, "Invalid unpack alignment %u", unpack_align);
-    if(usrfmt->channels != albuf->mChannels || usrfmt->type != albuf->mType) UNLIKELY
-        return context->setError(AL_INVALID_ENUM, "Unpacking data with mismatched format");
-    if(align != albuf->mBlockAlign) UNLIKELY
-        return context->setError(AL_INVALID_VALUE,
+    if(align < 1)
+        throw al::context_error{AL_INVALID_VALUE, "Invalid unpack alignment %u", unpack_align};
+    if(usrfmt->channels != albuf->mChannels || usrfmt->type != albuf->mType)
+        throw al::context_error{AL_INVALID_ENUM, "Unpacking data with mismatched format"};
+    if(align != albuf->mBlockAlign)
+        throw al::context_error{AL_INVALID_VALUE,
             "Unpacking data with alignment %u does not match original alignment %u", align,
-            albuf->mBlockAlign);
-    if(albuf->isBFormat() && albuf->UnpackAmbiOrder != albuf->mAmbiOrder) UNLIKELY
-        return context->setError(AL_INVALID_VALUE,
-            "Unpacking data with mismatched ambisonic order");
-    if(albuf->MappedAccess != 0) UNLIKELY
-        return context->setError(AL_INVALID_OPERATION, "Unpacking data into mapped buffer %u",
-            buffer);
+            albuf->mBlockAlign};
+    if(albuf->isBFormat() && albuf->UnpackAmbiOrder != albuf->mAmbiOrder)
+        throw al::context_error{AL_INVALID_VALUE,
+            "Unpacking data with mismatched ambisonic order"};
+    if(albuf->MappedAccess != 0)
+        throw al::context_error{AL_INVALID_OPERATION, "Unpacking data into mapped buffer %u",
+            buffer};
 
     const ALuint num_chans{albuf->channelsFromFmt()};
     const ALuint byte_align{
@@ -955,154 +934,170 @@ FORCE_ALIGN void AL_APIENTRY alBufferSubDataDirectSOFT(ALCcontext *context, ALui
 
     if(offset < 0 || length < 0 || static_cast<ALuint>(offset) > albuf->OriginalSize
         || static_cast<ALuint>(length) > albuf->OriginalSize-static_cast<ALuint>(offset))
-        UNLIKELY
-        return context->setError(AL_INVALID_VALUE, "Invalid data sub-range %d+%d on buffer %u",
-            offset, length, buffer);
-    if((static_cast<ALuint>(offset)%byte_align) != 0) UNLIKELY
-        return context->setError(AL_INVALID_VALUE,
+        throw al::context_error{AL_INVALID_VALUE, "Invalid data sub-range %d+%d on buffer %u",
+            offset, length, buffer};
+    if((static_cast<ALuint>(offset)%byte_align) != 0)
+        throw al::context_error{AL_INVALID_VALUE,
             "Sub-range offset %d is not a multiple of frame size %d (%d unpack alignment)",
-            offset, byte_align, align);
-    if((static_cast<ALuint>(length)%byte_align) != 0) UNLIKELY
-        return context->setError(AL_INVALID_VALUE,
+            offset, byte_align, align};
+    if((static_cast<ALuint>(length)%byte_align) != 0)
+        throw al::context_error{AL_INVALID_VALUE,
             "Sub-range length %d is not a multiple of frame size %d (%d unpack alignment)",
-            length, byte_align, align);
+            length, byte_align, align};
 
-    assert(al::to_underlying(usrfmt->type) == al::to_underlying(albuf->mType));
-    memcpy(albuf->mData.data()+offset, data, static_cast<ALuint>(length));
+    std::memcpy(albuf->mData.data()+offset, data, static_cast<ALuint>(length));
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
 
-AL_API DECL_FUNC3(void, alBufferf, ALuint, ALenum, ALfloat)
+AL_API DECL_FUNC3(void, alBufferf, ALuint,buffer, ALenum,param, ALfloat,value)
 FORCE_ALIGN void AL_APIENTRY alBufferfDirect(ALCcontext *context, ALuint buffer, ALenum param,
-    ALfloat /*value*/) noexcept
-{
+    ALfloat value [[maybe_unused]]) noexcept
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else switch(param)
+    if(LookupBuffer(device, buffer) == nullptr)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+
+    switch(param)
     {
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer float property 0x%04x", param);
     }
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer float property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNC5(void, alBuffer3f, ALuint, ALenum, ALfloat, ALfloat, ALfloat)
+AL_API DECL_FUNC5(void, alBuffer3f, ALuint,buffer, ALenum,param, ALfloat,value1, ALfloat,value2, ALfloat,value3)
 FORCE_ALIGN void AL_APIENTRY alBuffer3fDirect(ALCcontext *context, ALuint buffer, ALenum param,
-    ALfloat /*value1*/, ALfloat /*value2*/, ALfloat /*value3*/) noexcept
-{
+    ALfloat value1 [[maybe_unused]], ALfloat value2 [[maybe_unused]],
+    ALfloat value3 [[maybe_unused]]) noexcept
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else switch(param)
+    if(LookupBuffer(device, buffer) == nullptr)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+
+    switch(param)
     {
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer 3-float property 0x%04x", param);
     }
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer 3-float property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNC3(void, alBufferfv, ALuint, ALenum, const ALfloat*)
+AL_API DECL_FUNC3(void, alBufferfv, ALuint,buffer, ALenum,param, const ALfloat*,values)
 FORCE_ALIGN void AL_APIENTRY alBufferfvDirect(ALCcontext *context, ALuint buffer, ALenum param,
     const ALfloat *values) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(!values) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "NULL pointer");
-    else switch(param)
+    if(LookupBuffer(device, buffer) == nullptr)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(!values)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
+
+    switch(param)
     {
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer float-vector property 0x%04x", param);
     }
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer float-vector property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
 
-AL_API DECL_FUNC3(void, alBufferi, ALuint, ALenum, ALint)
+AL_API DECL_FUNC3(void, alBufferi, ALuint,buffer, ALenum,param, ALint,value)
 FORCE_ALIGN void AL_APIENTRY alBufferiDirect(ALCcontext *context, ALuint buffer, ALenum param,
     ALint value) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else switch(param)
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+
+    switch(param)
     {
     case AL_UNPACK_BLOCK_ALIGNMENT_SOFT:
-        if(value < 0) UNLIKELY
-            context->setError(AL_INVALID_VALUE, "Invalid unpack block alignment %d", value);
-        else
-            albuf->UnpackAlign = static_cast<ALuint>(value);
-        break;
+        if(value < 0)
+            throw al::context_error{AL_INVALID_VALUE, "Invalid unpack block alignment %d", value};
+        albuf->UnpackAlign = static_cast<ALuint>(value);
+        return;
 
     case AL_PACK_BLOCK_ALIGNMENT_SOFT:
-        if(value < 0) UNLIKELY
-            context->setError(AL_INVALID_VALUE, "Invalid pack block alignment %d", value);
-        else
-            albuf->PackAlign = static_cast<ALuint>(value);
-        break;
+        if(value < 0)
+            throw al::context_error{AL_INVALID_VALUE, "Invalid pack block alignment %d", value};
+        albuf->PackAlign = static_cast<ALuint>(value);
+        return;
 
     case AL_AMBISONIC_LAYOUT_SOFT:
-        if(albuf->ref.load(std::memory_order_relaxed) != 0) UNLIKELY
-            context->setError(AL_INVALID_OPERATION, "Modifying in-use buffer %u's ambisonic layout",
-                buffer);
-        else if(const auto layout = AmbiLayoutFromEnum(value))
+        if(albuf->ref.load(std::memory_order_relaxed) != 0)
+            throw al::context_error{AL_INVALID_OPERATION,
+                "Modifying in-use buffer %u's ambisonic layout", buffer};
+        if(const auto layout = AmbiLayoutFromEnum(value))
+        {
             albuf->mAmbiLayout = layout.value();
-        else UNLIKELY
-            context->setError(AL_INVALID_VALUE, "Invalid unpack ambisonic layout %04x", value);
-        break;
+            return;
+        }
+        throw al::context_error{AL_INVALID_VALUE, "Invalid unpack ambisonic layout %04x", value};
 
     case AL_AMBISONIC_SCALING_SOFT:
-        if(albuf->ref.load(std::memory_order_relaxed) != 0) UNLIKELY
-            context->setError(AL_INVALID_OPERATION, "Modifying in-use buffer %u's ambisonic scaling",
-                buffer);
-        else if(const auto scaling = AmbiScalingFromEnum(value))
+        if(albuf->ref.load(std::memory_order_relaxed) != 0)
+            throw al::context_error{AL_INVALID_OPERATION,
+                "Modifying in-use buffer %u's ambisonic scaling", buffer};
+        if(const auto scaling = AmbiScalingFromEnum(value))
+        {
             albuf->mAmbiScaling = scaling.value();
-        else UNLIKELY
-            context->setError(AL_INVALID_VALUE, "Invalid unpack ambisonic scaling %04x", value);
-        break;
+            return;
+        }
+        throw al::context_error{AL_INVALID_VALUE, "Invalid unpack ambisonic scaling %04x", value};
 
     case AL_UNPACK_AMBISONIC_ORDER_SOFT:
-        if(value < 1 || value > 14) UNLIKELY
-            context->setError(AL_INVALID_VALUE, "Invalid unpack ambisonic order %d", value);
-        else
-            albuf->UnpackAmbiOrder = static_cast<ALuint>(value);
-        break;
-
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer integer property 0x%04x", param);
+        if(value < 1 || value > 14)
+            throw al::context_error{AL_INVALID_VALUE, "Invalid unpack ambisonic order %d", value};
+        albuf->UnpackAmbiOrder = static_cast<ALuint>(value);
+        return;
     }
+
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer integer property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNC5(void, alBuffer3i, ALuint, ALenum, ALint, ALint, ALint)
+AL_API DECL_FUNC5(void, alBuffer3i, ALuint,buffer, ALenum,param, ALint,value1, ALint,value2, ALint,value3)
 FORCE_ALIGN void AL_APIENTRY alBuffer3iDirect(ALCcontext *context, ALuint buffer, ALenum param,
-    ALint /*value1*/, ALint /*value2*/, ALint /*value3*/) noexcept
-{
+    ALint value1 [[maybe_unused]], ALint value2 [[maybe_unused]], ALint value3 [[maybe_unused]]) noexcept
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else switch(param)
+    if(LookupBuffer(device, buffer) == nullptr)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+
+    switch(param)
     {
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer 3-integer property 0x%04x", param);
     }
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer 3-integer property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNC3(void, alBufferiv, ALuint, ALenum, const ALint*)
+AL_API DECL_FUNC3(void, alBufferiv, ALuint,buffer, ALenum,param, const ALint*,values)
 FORCE_ALIGN void AL_APIENTRY alBufferivDirect(ALCcontext *context, ALuint buffer, ALenum param,
     const ALint *values) noexcept
-{
-    if(!values) UNLIKELY
-        return context->setError(AL_INVALID_VALUE, "NULL pointer");
+try {
+    if(!values)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
 
     switch(param)
     {
@@ -1111,85 +1106,93 @@ FORCE_ALIGN void AL_APIENTRY alBufferivDirect(ALCcontext *context, ALuint buffer
     case AL_AMBISONIC_LAYOUT_SOFT:
     case AL_AMBISONIC_SCALING_SOFT:
     case AL_UNPACK_AMBISONIC_ORDER_SOFT:
-        alBufferiDirect(context, buffer, param, values[0]);
+        alBufferiDirect(context, buffer, param, *values);
         return;
     }
 
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    ALbuffer *albuf = LookupBuffer(device, buffer);
-    if(!albuf) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else switch(param)
+    ALbuffer *albuf{LookupBuffer(device, buffer)};
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+
+    switch(param)
     {
     case AL_LOOP_POINTS_SOFT:
-        if(albuf->ref.load(std::memory_order_relaxed) != 0) UNLIKELY
-            context->setError(AL_INVALID_OPERATION, "Modifying in-use buffer %u's loop points",
-                buffer);
-        else if(values[0] < 0 || values[0] >= values[1]
-            || static_cast<ALuint>(values[1]) > albuf->mSampleLen) UNLIKELY
-            context->setError(AL_INVALID_VALUE, "Invalid loop point range %d -> %d on buffer %u",
-                values[0], values[1], buffer);
-        else
-        {
-            albuf->mLoopStart = static_cast<ALuint>(values[0]);
-            albuf->mLoopEnd = static_cast<ALuint>(values[1]);
-        }
-        break;
+        auto vals = al::span{values, 2_uz};
+        if(albuf->ref.load(std::memory_order_relaxed) != 0)
+            throw al::context_error{AL_INVALID_OPERATION,
+                "Modifying in-use buffer %u's loop points", buffer};
+        if(vals[0] < 0 || vals[0] >= vals[1] || static_cast<ALuint>(vals[1]) > albuf->mSampleLen)
+            throw al::context_error{AL_INVALID_VALUE,
+                "Invalid loop point range %d -> %d on buffer %u", vals[0], vals[1], buffer};
 
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer integer-vector property 0x%04x", param);
+        albuf->mLoopStart = static_cast<ALuint>(vals[0]);
+        albuf->mLoopEnd = static_cast<ALuint>(vals[1]);
+        return;
     }
+
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer integer-vector property 0x%04x",
+        param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
 
-AL_API DECL_FUNC3(void, alGetBufferf, ALuint, ALenum, ALfloat*)
+AL_API DECL_FUNC3(void, alGetBufferf, ALuint,buffer, ALenum,param, ALfloat*,value)
 FORCE_ALIGN void AL_APIENTRY alGetBufferfDirect(ALCcontext *context, ALuint buffer, ALenum param,
     ALfloat *value) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(!value) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "NULL pointer");
-    else switch(param)
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(!value)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
+
+    switch(param)
     {
     case AL_SEC_LENGTH_SOFT:
         *value = (albuf->mSampleRate < 1) ? 0.0f :
             (static_cast<float>(albuf->mSampleLen) / static_cast<float>(albuf->mSampleRate));
-        break;
-
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer float property 0x%04x", param);
+        return;
     }
+
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer float property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNC5(void, alGetBuffer3f, ALuint, ALenum, ALfloat*, ALfloat*, ALfloat*)
+AL_API DECL_FUNC5(void, alGetBuffer3f, ALuint,buffer, ALenum,param, ALfloat*,value1, ALfloat*,value2, ALfloat*,value3)
 FORCE_ALIGN void AL_APIENTRY alGetBuffer3fDirect(ALCcontext *context, ALuint buffer, ALenum param,
     ALfloat *value1, ALfloat *value2, ALfloat *value3) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(!value1 || !value2 || !value3) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "NULL pointer");
-    else switch(param)
+    if(LookupBuffer(device, buffer) == nullptr)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(!value1 || !value2 || !value3)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
+
+    switch(param)
     {
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer 3-float property 0x%04x", param);
     }
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer 3-float property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNC3(void, alGetBufferfv, ALuint, ALenum, ALfloat*)
+AL_API DECL_FUNC3(void, alGetBufferfv, ALuint,buffer, ALenum,param, ALfloat*,values)
 FORCE_ALIGN void AL_APIENTRY alGetBufferfvDirect(ALCcontext *context, ALuint buffer, ALenum param,
     ALfloat *values) noexcept
-{
+try {
     switch(param)
     {
     case AL_SEC_LENGTH_SOFT:
@@ -1200,103 +1203,114 @@ FORCE_ALIGN void AL_APIENTRY alGetBufferfvDirect(ALCcontext *context, ALuint buf
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
-    if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(!values) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "NULL pointer");
-    else switch(param)
+    if(LookupBuffer(device, buffer) == nullptr)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(!values)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
+
+    switch(param)
     {
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer float-vector property 0x%04x", param);
     }
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer float-vector property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
 
-AL_API DECL_FUNC3(void, alGetBufferi, ALuint, ALenum, ALint*)
+AL_API DECL_FUNC3(void, alGetBufferi, ALuint,buffer, ALenum,param, ALint*,value)
 FORCE_ALIGN void AL_APIENTRY alGetBufferiDirect(ALCcontext *context, ALuint buffer, ALenum param,
     ALint *value) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
+
     ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(!value) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "NULL pointer");
-    else switch(param)
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(!value)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
+
+    switch(param)
     {
     case AL_FREQUENCY:
         *value = static_cast<ALint>(albuf->mSampleRate);
-        break;
+        return;
 
     case AL_BITS:
         *value = (albuf->mType == FmtIMA4 || albuf->mType == FmtMSADPCM) ? 4
             : static_cast<ALint>(albuf->bytesFromFmt() * 8);
-        break;
+        return;
 
     case AL_CHANNELS:
         *value = static_cast<ALint>(albuf->channelsFromFmt());
-        break;
+        return;
 
     case AL_SIZE:
         *value = albuf->mCallback ? 0 : static_cast<ALint>(albuf->mData.size());
-        break;
+        return;
 
     case AL_BYTE_LENGTH_SOFT:
         *value = static_cast<ALint>(albuf->mSampleLen / albuf->mBlockAlign
             * albuf->blockSizeFromFmt());
-        break;
+        return;
 
     case AL_SAMPLE_LENGTH_SOFT:
         *value = static_cast<ALint>(albuf->mSampleLen);
-        break;
+        return;
 
     case AL_UNPACK_BLOCK_ALIGNMENT_SOFT:
         *value = static_cast<ALint>(albuf->UnpackAlign);
-        break;
+        return;
 
     case AL_PACK_BLOCK_ALIGNMENT_SOFT:
         *value = static_cast<ALint>(albuf->PackAlign);
-        break;
+        return;
 
     case AL_AMBISONIC_LAYOUT_SOFT:
         *value = EnumFromAmbiLayout(albuf->mAmbiLayout);
-        break;
+        return;
 
     case AL_AMBISONIC_SCALING_SOFT:
         *value = EnumFromAmbiScaling(albuf->mAmbiScaling);
-        break;
+        return;
 
     case AL_UNPACK_AMBISONIC_ORDER_SOFT:
         *value = static_cast<int>(albuf->UnpackAmbiOrder);
-        break;
-
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer integer property 0x%04x", param);
+        return;
     }
+
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer integer property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNC5(void, alGetBuffer3i, ALuint, ALenum, ALint*, ALint*, ALint*)
+AL_API DECL_FUNC5(void, alGetBuffer3i, ALuint,buffer, ALenum,param, ALint*,value1, ALint*,value2, ALint*,value3)
 FORCE_ALIGN void AL_APIENTRY alGetBuffer3iDirect(ALCcontext *context, ALuint buffer, ALenum param,
     ALint *value1, ALint *value2, ALint *value3) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
-    if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(!value1 || !value2 || !value3) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "NULL pointer");
-    else switch(param)
+
+    if(LookupBuffer(device, buffer) == nullptr)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(!value1 || !value2 || !value3)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
+
+    switch(param)
     {
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer 3-integer property 0x%04x", param);
     }
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer 3-integer property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNC3(void, alGetBufferiv, ALuint, ALenum, ALint*)
+AL_API DECL_FUNC3(void, alGetBufferiv, ALuint,buffer, ALenum,param, ALint*,values)
 FORCE_ALIGN void AL_APIENTRY alGetBufferivDirect(ALCcontext *context, ALuint buffer, ALenum param,
     ALint *values) noexcept
-{
+try {
     switch(param)
     {
     case AL_FREQUENCY:
@@ -1317,95 +1331,109 @@ FORCE_ALIGN void AL_APIENTRY alGetBufferivDirect(ALCcontext *context, ALuint buf
 
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
+
     ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(!values) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "NULL pointer");
-    else switch(param)
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(!values)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
+
+    switch(param)
     {
     case AL_LOOP_POINTS_SOFT:
-        values[0] = static_cast<ALint>(albuf->mLoopStart);
-        values[1] = static_cast<ALint>(albuf->mLoopEnd);
-        break;
-
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer integer-vector property 0x%04x", param);
+        auto vals = al::span{values, 2_uz};
+        vals[0] = static_cast<ALint>(albuf->mLoopStart);
+        vals[1] = static_cast<ALint>(albuf->mLoopEnd);
+        return;
     }
+
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer integer-vector property 0x%04x",
+        param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
 
-AL_API DECL_FUNCEXT5(void, alBufferCallback,SOFT, ALuint, ALenum, ALsizei, ALBUFFERCALLBACKTYPESOFT, ALvoid*)
+AL_API DECL_FUNCEXT5(void, alBufferCallback,SOFT, ALuint,buffer, ALenum,format, ALsizei,freq, ALBUFFERCALLBACKTYPESOFT,callback, ALvoid*,userptr)
 FORCE_ALIGN void AL_APIENTRY alBufferCallbackDirectSOFT(ALCcontext *context, ALuint buffer,
     ALenum format, ALsizei freq, ALBUFFERCALLBACKTYPESOFT callback, ALvoid *userptr) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(freq < 1) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "Invalid sample rate %d", freq);
-    else if(callback == nullptr) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "NULL callback");
-    else
-    {
-        auto usrfmt = DecomposeUserFormat(format);
-        if(!usrfmt) UNLIKELY
-            context->setError(AL_INVALID_ENUM, "Invalid format 0x%04x", format);
-        else
-            PrepareCallback(context, albuf, freq, usrfmt->channels, usrfmt->type, callback,
-                userptr);
-    }
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(freq < 1)
+        throw al::context_error{AL_INVALID_VALUE, "Invalid sample rate %d", freq};
+    if(callback == nullptr)
+        throw al::context_error{AL_INVALID_VALUE, "NULL callback"};
+
+    auto usrfmt = DecomposeUserFormat(format);
+    if(!usrfmt)
+        throw al::context_error{AL_INVALID_ENUM, "Invalid format 0x%04x", format};
+
+    PrepareCallback(context, albuf, freq, usrfmt->channels, usrfmt->type, callback, userptr);
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNCEXT3(void, alGetBufferPtr,SOFT, ALuint, ALenum, ALvoid**)
+AL_API DECL_FUNCEXT3(void, alGetBufferPtr,SOFT, ALuint,buffer, ALenum,param, ALvoid**,value)
 FORCE_ALIGN void AL_APIENTRY alGetBufferPtrDirectSOFT(ALCcontext *context, ALuint buffer,
     ALenum param, ALvoid **value) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
+
     ALbuffer *albuf{LookupBuffer(device, buffer)};
-    if(!albuf) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(!value) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "NULL pointer");
-    else switch(param)
+    if(!albuf)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(!value)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
+
+    switch(param)
     {
     case AL_BUFFER_CALLBACK_FUNCTION_SOFT:
         *value = reinterpret_cast<void*>(albuf->mCallback);
-        break;
+        return;
     case AL_BUFFER_CALLBACK_USER_PARAM_SOFT:
         *value = albuf->mUserData;
-        break;
-
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer pointer property 0x%04x", param);
+        return;
     }
+
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer pointer property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNCEXT5(void, alGetBuffer3Ptr,SOFT, ALuint, ALenum, ALvoid**, ALvoid**, ALvoid**)
+AL_API DECL_FUNCEXT5(void, alGetBuffer3Ptr,SOFT, ALuint,buffer, ALenum,param, ALvoid**,value1, ALvoid**,value2, ALvoid**,value3)
 FORCE_ALIGN void AL_APIENTRY alGetBuffer3PtrDirectSOFT(ALCcontext *context, ALuint buffer,
     ALenum param, ALvoid **value1, ALvoid **value2, ALvoid **value3) noexcept
-{
+try {
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
-    if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(!value1 || !value2 || !value3) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "NULL pointer");
-    else switch(param)
+
+    if(LookupBuffer(device, buffer) == nullptr)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(!value1 || !value2 || !value3)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
+
+    switch(param)
     {
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer 3-pointer property 0x%04x", param);
     }
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer 3-pointer property 0x%04x", param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
-AL_API DECL_FUNCEXT3(void, alGetBufferPtrv,SOFT, ALuint, ALenum, ALvoid**)
+AL_API DECL_FUNCEXT3(void, alGetBufferPtrv,SOFT, ALuint,buffer, ALenum,param, ALvoid**,values)
 FORCE_ALIGN void AL_APIENTRY alGetBufferPtrvDirectSOFT(ALCcontext *context, ALuint buffer,
     ALenum param, ALvoid **values) noexcept
-{
+try {
     switch(param)
     {
     case AL_BUFFER_CALLBACK_FUNCTION_SOFT:
@@ -1416,15 +1444,20 @@ FORCE_ALIGN void AL_APIENTRY alGetBufferPtrvDirectSOFT(ALCcontext *context, ALui
 
     ALCdevice *device{context->mALDevice.get()};
     std::lock_guard<std::mutex> buflock{device->BufferLock};
-    if(LookupBuffer(device, buffer) == nullptr) UNLIKELY
-        context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", buffer);
-    else if(!values) UNLIKELY
-        context->setError(AL_INVALID_VALUE, "NULL pointer");
-    else switch(param)
+
+    if(LookupBuffer(device, buffer) == nullptr)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
+    if(!values)
+        throw al::context_error{AL_INVALID_VALUE, "NULL pointer"};
+
+    switch(param)
     {
-    default:
-        context->setError(AL_INVALID_ENUM, "Invalid buffer pointer-vector property 0x%04x", param);
     }
+    throw al::context_error{AL_INVALID_ENUM, "Invalid buffer pointer-vector property 0x%04x",
+        param};
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "%s", e.what());
 }
 
 
@@ -1472,8 +1505,8 @@ void ALbuffer::SetName(ALCcontext *context, ALuint id, std::string_view name)
     std::lock_guard<std::mutex> buflock{device->BufferLock};
 
     auto buffer = LookupBuffer(device, id);
-    if(!buffer) UNLIKELY
-        return context->setError(AL_INVALID_NAME, "Invalid buffer ID %u", id);
+    if(!buffer)
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", id};
 
     device->mBufferNames.insert_or_assign(id, name);
 }
@@ -1498,39 +1531,24 @@ BufferSubList::~BufferSubList()
 
 
 #ifdef ALSOFT_EAX
-FORCE_ALIGN DECL_FUNC3(ALboolean, EAXSetBufferMode, ALsizei, const ALuint*, ALint)
+FORCE_ALIGN DECL_FUNC3(ALboolean, EAXSetBufferMode, ALsizei,n, const ALuint*,buffers, ALint,value)
 FORCE_ALIGN ALboolean AL_APIENTRY EAXSetBufferModeDirect(ALCcontext *context, ALsizei n,
     const ALuint *buffers, ALint value) noexcept
-{
-#define EAX_PREFIX "[EAXSetBufferMode] "
-
+try {
     if(!eax_g_is_enabled)
-    {
-        context->setError(AL_INVALID_OPERATION, EAX_PREFIX "%s", "EAX not enabled.");
-        return AL_FALSE;
-    }
+        throw al::context_error{AL_INVALID_OPERATION, "EAX not enabled"};
 
     const auto storage = EaxStorageFromEnum(value);
     if(!storage)
-    {
-        context->setError(AL_INVALID_ENUM, EAX_PREFIX "Unsupported X-RAM mode 0x%x", value);
-        return AL_FALSE;
-    }
+        throw al::context_error{AL_INVALID_ENUM, "Unsupported X-RAM mode 0x%x", value};
 
     if(n == 0)
         return AL_TRUE;
 
     if(n < 0)
-    {
-        context->setError(AL_INVALID_VALUE, EAX_PREFIX "Buffer count %d out of range", n);
-        return AL_FALSE;
-    }
-
+        throw al::context_error{AL_INVALID_VALUE, "Buffer count %d out of range", n};
     if(!buffers)
-    {
-        context->setError(AL_INVALID_VALUE, EAX_PREFIX "%s", "Null AL buffers");
-        return AL_FALSE;
-    }
+        throw al::context_error{AL_INVALID_VALUE, "Null AL buffers"};
 
     auto device = context->mALDevice.get();
     std::lock_guard<std::mutex> devlock{device->BufferLock};
@@ -1538,16 +1556,13 @@ FORCE_ALIGN ALboolean AL_APIENTRY EAXSetBufferModeDirect(ALCcontext *context, AL
     /* Special-case setting a single buffer, to avoid extraneous allocations. */
     if(n == 1)
     {
-        const auto bufid = buffers[0];
+        const auto bufid = *buffers;
         if(bufid == AL_NONE)
             return AL_TRUE;
 
         const auto buffer = LookupBuffer(device, bufid);
-        if(!buffer) UNLIKELY
-        {
-            ERR(EAX_PREFIX "Invalid buffer ID %u.\n", bufid);
-            return AL_FALSE;
-        }
+        if(!buffer)
+            throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", bufid};
 
         /* TODO: Is the store location allowed to change for in-use buffers, or
          * only when not set/queued on a source?
@@ -1556,13 +1571,10 @@ FORCE_ALIGN ALboolean AL_APIENTRY EAXSetBufferModeDirect(ALCcontext *context, AL
         if(*storage == EaxStorage::Hardware)
         {
             if(!buffer->eax_x_ram_is_hardware
-                && buffer->OriginalSize > device->eax_x_ram_free_size) UNLIKELY
-            {
-                context->setError(AL_OUT_OF_MEMORY,
-                    EAX_PREFIX "Out of X-RAM memory (need: %u, avail: %u)", buffer->OriginalSize,
-                    device->eax_x_ram_free_size);
-                return AL_FALSE;
-            }
+                && buffer->OriginalSize > device->eax_x_ram_free_size)
+                throw al::context_error{AL_OUT_OF_MEMORY,
+                    "Out of X-RAM memory (need: %u, avail: %u)", buffer->OriginalSize,
+                    device->eax_x_ram_free_size};
 
             eax_x_ram_apply(*device, *buffer);
         }
@@ -1574,18 +1586,14 @@ FORCE_ALIGN ALboolean AL_APIENTRY EAXSetBufferModeDirect(ALCcontext *context, AL
 
     /* Validate the buffers. */
     std::unordered_set<ALbuffer*> buflist;
-    for(auto i = 0;i < n;++i)
+    for(const ALuint bufid : al::span{buffers, static_cast<ALuint>(n)})
     {
-        const auto bufid = buffers[i];
         if(bufid == AL_NONE)
             continue;
 
         const auto buffer = LookupBuffer(device, bufid);
-        if(!buffer) UNLIKELY
-        {
-            ERR(EAX_PREFIX "Invalid buffer ID %u.\n", bufid);
-            return AL_FALSE;
-        }
+        if(!buffer)
+            throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", bufid};
 
         /* TODO: Is the store location allowed to change for in-use buffers, or
          * only when not set/queued on a source?
@@ -1601,22 +1609,16 @@ FORCE_ALIGN ALboolean AL_APIENTRY EAXSetBufferModeDirect(ALCcontext *context, AL
         {
             if(!buffer->eax_x_ram_is_hardware)
             {
-                if(std::numeric_limits<size_t>::max()-buffer->OriginalSize < total_needed) UNLIKELY
-                {
-                    context->setError(AL_OUT_OF_MEMORY, EAX_PREFIX "Size overflow (%u + %zu)\n",
-                        buffer->OriginalSize, total_needed);
-                    return AL_FALSE;
-                }
+                if(std::numeric_limits<size_t>::max() - buffer->OriginalSize < total_needed)
+                    throw al::context_error{AL_OUT_OF_MEMORY, "Size overflow (%u + %zu)",
+                        buffer->OriginalSize, total_needed};
+
                 total_needed += buffer->OriginalSize;
             }
         }
         if(total_needed > device->eax_x_ram_free_size)
-        {
-            context->setError(AL_OUT_OF_MEMORY,
-                EAX_PREFIX "Out of X-RAM memory (need: %zu, avail: %u)", total_needed,
-                device->eax_x_ram_free_size);
-            return AL_FALSE;
-        }
+            throw al::context_error{AL_OUT_OF_MEMORY, "Out of X-RAM memory (need: %zu, avail: %u)",
+                total_needed, device->eax_x_ram_free_size};
     }
 
     /* Update the mode. */
@@ -1630,41 +1632,35 @@ FORCE_ALIGN ALboolean AL_APIENTRY EAXSetBufferModeDirect(ALCcontext *context, AL
     }
 
     return AL_TRUE;
-
-#undef EAX_PREFIX
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "[EAXSetBufferMode] %s", e.what());
+    return AL_FALSE;
 }
 
-FORCE_ALIGN DECL_FUNC2(ALenum, EAXGetBufferMode, ALuint, ALint*)
+FORCE_ALIGN DECL_FUNC2(ALenum, EAXGetBufferMode, ALuint,buffer, ALint*,pReserved)
 FORCE_ALIGN ALenum AL_APIENTRY EAXGetBufferModeDirect(ALCcontext *context, ALuint buffer,
     ALint *pReserved) noexcept
-{
-#define EAX_PREFIX "[EAXGetBufferMode] "
+try {
 
     if(!eax_g_is_enabled)
-    {
-        context->setError(AL_INVALID_OPERATION, EAX_PREFIX "%s", "EAX not enabled.");
-        return AL_NONE;
-    }
+        throw al::context_error{AL_INVALID_OPERATION, "EAX not enabled."};
 
     if(pReserved)
-    {
-        context->setError(AL_INVALID_VALUE, EAX_PREFIX "%s", "Non-null reserved parameter");
-        return AL_NONE;
-    }
+        throw al::context_error{AL_INVALID_VALUE, "Non-null reserved parameter"};
 
     auto device = context->mALDevice.get();
     std::lock_guard<std::mutex> devlock{device->BufferLock};
 
     const auto al_buffer = LookupBuffer(device, buffer);
     if(!al_buffer)
-    {
-        context->setError(AL_INVALID_NAME, EAX_PREFIX "Invalid buffer ID %u", buffer);
-        return AL_NONE;
-    }
+        throw al::context_error{AL_INVALID_NAME, "Invalid buffer ID %u", buffer};
 
     return EnumFromEaxStorage(al_buffer->eax_x_ram_mode);
-
-#undef EAX_PREFIX
+}
+catch(al::context_error& e) {
+    context->setError(e.errorCode(), "[EAXGetBufferMode] %s", e.what());
+    return AL_NONE;
 }
 
 #endif // ALSOFT_EAX

@@ -22,24 +22,26 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
-#include <iterator>
+#include <variant>
 
 #include "alc/effects/base.h"
-#include "almalloc.h"
 #include "alnumbers.h"
 #include "alnumeric.h"
 #include "alspan.h"
+#include "core/ambidefs.h"
 #include "core/bufferline.h"
 #include "core/context.h"
-#include "core/devformat.h"
 #include "core/device.h"
+#include "core/effects/base.h"
 #include "core/effectslot.h"
 #include "core/filters/biquad.h"
 #include "core/mixer.h"
 #include "core/mixer/defs.h"
 #include "intrusive_ptr.h"
 
+struct BufferStorage;
 
 namespace {
 
@@ -122,7 +124,7 @@ void DistortionState::process(const size_t samplesToDo, const al::span<const Flo
          * (which is fortunately first step of distortion). So combine three
          * operations into the one.
          */
-        mLowpass.process({mBuffer[0].data(), todo}, mBuffer[1].data());
+        mLowpass.process({mBuffer[0].data(), todo}, mBuffer[1]);
 
         /* Second step, do distortion using waveshaper function to emulate
          * signal processing during tube overdriving. Three steps of
@@ -131,31 +133,39 @@ void DistortionState::process(const size_t samplesToDo, const al::span<const Flo
          */
         auto proc_sample = [fc](float smp) -> float
         {
-            smp = (1.0f + fc) * smp/(1.0f + fc*std::abs(smp));
-            smp = (1.0f + fc) * smp/(1.0f + fc*std::abs(smp)) * -1.0f;
-            smp = (1.0f + fc) * smp/(1.0f + fc*std::abs(smp));
+            smp = (1.0f + fc) * smp/(1.0f + fc*std::fabs(smp));
+            smp = (1.0f + fc) * smp/(1.0f + fc*std::fabs(smp)) * -1.0f;
+            smp = (1.0f + fc) * smp/(1.0f + fc*std::fabs(smp));
             return smp;
         };
         std::transform(mBuffer[1].begin(), mBuffer[1].begin()+todo, mBuffer[0].begin(),
             proc_sample);
 
         /* Third step, do bandpass filtering of distorted signal. */
-        mBandpass.process({mBuffer[0].data(), todo}, mBuffer[1].data());
+        mBandpass.process({mBuffer[0].data(), todo}, mBuffer[1]);
 
         todo >>= 2;
-        const float *outgains{mGain.data()};
-        for(FloatBufferLine &RESTRICT output : samplesOut)
+        auto outgains = mGain.cbegin();
+        auto proc_bufline = [this,base,todo,&outgains](FloatBufferSpan output)
         {
             /* Fourth step, final, do attenuation and perform decimation,
              * storing only one sample out of four.
              */
             const float gain{*(outgains++)};
             if(!(std::fabs(gain) > GainSilenceThreshold))
-                continue;
+                return;
 
-            for(size_t i{0u};i < todo;i++)
-                output[base+i] += gain * mBuffer[1][i*4];
-        }
+            auto src = mBuffer[1].cbegin();
+            const auto dst = al::span{output}.subspan(base, todo);
+            auto dec_sample = [gain,&src](float sample) noexcept -> float
+            {
+                sample += *src * gain;
+                src += 4;
+                return sample;
+            };
+            std::transform(dst.begin(), dst.end(), dst.begin(), dec_sample);
+        };
+        std::for_each(samplesOut.begin(), samplesOut.end(), proc_bufline);
 
         base += todo;
     }

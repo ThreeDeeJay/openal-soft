@@ -54,7 +54,7 @@ std::vector<std::string_view> getContextExtensions() noexcept
         "AL_EXT_ALAW"sv,
         "AL_EXT_BFORMAT"sv,
         "AL_EXT_debug"sv,
-        "AL_EXTX_direct_context"sv,
+        "AL_EXT_direct_context"sv,
         "AL_EXT_DOUBLE"sv,
         "AL_EXT_EXPONENT_DISTANCE"sv,
         "AL_EXT_FLOAT32"sv,
@@ -88,6 +88,7 @@ std::vector<std::string_view> getContextExtensions() noexcept
         "AL_SOFT_MSADPCM"sv,
         "AL_SOFT_source_latency"sv,
         "AL_SOFT_source_length"sv,
+        "AL_SOFTX_source_panning"sv,
         "AL_SOFT_source_resampler"sv,
         "AL_SOFT_source_spatialize"sv,
         "AL_SOFT_source_start_delay"sv,
@@ -162,12 +163,10 @@ void ALCcontext::init()
         auxslots = EffectSlot::CreatePtrArray(0);
     else
     {
-        auxslots = EffectSlot::CreatePtrArray(1);
-        if(auxslots)
-        {
-            (*auxslots)[0] = mDefaultSlot->mSlot;
-            mDefaultSlot->mState = SlotState::Playing;
-        }
+        auxslots = EffectSlot::CreatePtrArray(2);
+        (*auxslots)[0] = mDefaultSlot->mSlot;
+        (*auxslots)[1] = mDefaultSlot->mSlot;
+        mDefaultSlot->mState = SlotState::Playing;
     }
     mActiveAuxSlots.store(std::move(auxslots), std::memory_order_relaxed);
 
@@ -183,12 +182,12 @@ void ALCcontext::init()
 
     if(sBufferSubDataCompat)
     {
-        auto iter = std::find(mExtensions.begin(), mExtensions.end(), "AL_EXT_SOURCE_RADIUS");
+        auto iter = std::find(mExtensions.begin(), mExtensions.end(), "AL_EXT_SOURCE_RADIUS"sv);
         if(iter != mExtensions.end()) mExtensions.erase(iter);
         /* TODO: Would be nice to sort this alphabetically. Needs case-
          * insensitive searching.
          */
-        mExtensions.emplace_back("AL_SOFT_buffer_sub_data");
+        mExtensions.emplace_back("AL_SOFT_buffer_sub_data"sv);
     }
 
 #ifdef ALSOFT_EAX
@@ -1013,25 +1012,20 @@ void ALCcontext::eaxCommit()
 }
 
 
-FORCE_ALIGN ALenum AL_APIENTRY EAXSet(const GUID *a, ALuint b, ALuint c, ALvoid *d, ALuint e) noexcept
+FORCE_ALIGN auto AL_APIENTRY EAXSet(const GUID *property_set_id, ALuint property_id,
+    ALuint source_id, ALvoid *value, ALuint value_size) noexcept -> ALenum
 {
     auto context = GetContextRef();
     if(!context) UNLIKELY return AL_INVALID_OPERATION;
-    return EAXSetDirect(context.get(), a, b, c, d, e);
+    return EAXSetDirect(context.get(), property_set_id, property_id, source_id, value, value_size);
 }
 
-FORCE_ALIGN ALenum AL_APIENTRY EAXSetDirect(ALCcontext *context, const GUID *property_set_id,
-    ALuint property_id, ALuint property_source_id, ALvoid *property_value,
-    ALuint property_value_size) noexcept
+FORCE_ALIGN auto AL_APIENTRY EAXSetDirect(ALCcontext *context, const GUID *property_set_id,
+    ALuint property_id, ALuint source_id, ALvoid *value, ALuint value_size) noexcept -> ALenum
 try
 {
     std::lock_guard<std::mutex> prop_lock{context->mPropLock};
-    return context->eax_eax_set(
-        property_set_id,
-        property_id,
-        property_source_id,
-        property_value,
-        property_value_size);
+    return context->eax_eax_set(property_set_id, property_id, source_id, value, value_size);
 }
 catch(...)
 {
@@ -1041,25 +1035,20 @@ catch(...)
 }
 
 
-FORCE_ALIGN ALenum AL_APIENTRY EAXGet(const GUID *a, ALuint b, ALuint c, ALvoid *d, ALuint e) noexcept
+FORCE_ALIGN auto AL_APIENTRY EAXGet(const GUID *property_set_id, ALuint property_id,
+    ALuint source_id, ALvoid *value, ALuint value_size) noexcept -> ALenum
 {
     auto context = GetContextRef();
     if(!context) UNLIKELY return AL_INVALID_OPERATION;
-    return EAXGetDirect(context.get(), a, b, c, d, e);
+    return EAXGetDirect(context.get(), property_set_id, property_id, source_id, value, value_size);
 }
 
-FORCE_ALIGN ALenum AL_APIENTRY EAXGetDirect(ALCcontext *context, const GUID *property_set_id,
-    ALuint property_id, ALuint property_source_id, ALvoid *property_value,
-    ALuint property_value_size) noexcept
+FORCE_ALIGN auto AL_APIENTRY EAXGetDirect(ALCcontext *context, const GUID *property_set_id,
+    ALuint property_id, ALuint source_id, ALvoid *value, ALuint value_size) noexcept -> ALenum
 try
 {
     std::lock_guard<std::mutex> prop_lock{context->mPropLock};
-    return context->eax_eax_get(
-        property_set_id,
-        property_id,
-        property_source_id,
-        property_value,
-        property_value_size);
+    return context->eax_eax_get(property_set_id, property_id, source_id, value, value_size);
 }
 catch(...)
 {

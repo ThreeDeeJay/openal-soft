@@ -2,9 +2,11 @@
 #define AL_NUMERIC_H
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <type_traits>
 #ifdef HAVE_INTRIN_H
 #include <intrin.h>
@@ -18,13 +20,13 @@
 #include "opthelpers.h"
 
 
-constexpr auto operator "" _i64(unsigned long long n) noexcept { return static_cast<int64_t>(n); }
-constexpr auto operator "" _u64(unsigned long long n) noexcept { return static_cast<uint64_t>(n); }
+constexpr auto operator "" _i64(unsigned long long n) noexcept { return static_cast<std::int64_t>(n); }
+constexpr auto operator "" _u64(unsigned long long n) noexcept { return static_cast<std::uint64_t>(n); }
 
 constexpr auto operator "" _z(unsigned long long n) noexcept
-{ return static_cast<std::make_signed_t<size_t>>(n); }
-constexpr auto operator "" _uz(unsigned long long n) noexcept { return static_cast<size_t>(n); }
-constexpr auto operator "" _zu(unsigned long long n) noexcept { return static_cast<size_t>(n); }
+{ return static_cast<std::make_signed_t<std::size_t>>(n); }
+constexpr auto operator "" _uz(unsigned long long n) noexcept { return static_cast<std::size_t>(n); }
+constexpr auto operator "" _zu(unsigned long long n) noexcept { return static_cast<std::size_t>(n); }
 
 
 constexpr auto GetCounterSuffix(size_t count) noexcept -> const char*
@@ -39,16 +41,6 @@ constexpr auto GetCounterSuffix(size_t count) noexcept -> const char*
 
 constexpr inline float lerpf(float val1, float val2, float mu) noexcept
 { return val1 + (val2-val1)*mu; }
-constexpr inline float cubic(float val1, float val2, float val3, float val4, float mu) noexcept
-{
-    const float mu2{mu*mu}, mu3{mu2*mu};
-    const float a0{-0.5f*mu3 +       mu2 + -0.5f*mu};
-    const float a1{ 1.5f*mu3 + -2.5f*mu2            + 1.0f};
-    const float a2{-1.5f*mu3 +  2.0f*mu2 +  0.5f*mu};
-    const float a3{ 0.5f*mu3 + -0.5f*mu2};
-    return val1*a0 + val2*a1 + val3*a2 + val4*a3;
-}
-
 constexpr inline double lerpd(double val1, double val2, double mu) noexcept
 { return val1 + (val2-val1)*mu; }
 

@@ -22,25 +22,26 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
-#include <iterator>
-#include <tuple>
+#include <variant>
 #include <vector>
 
 #include "alc/effects/base.h"
-#include "almalloc.h"
 #include "alnumeric.h"
 #include "alspan.h"
+#include "core/ambidefs.h"
 #include "core/bufferline.h"
 #include "core/context.h"
-#include "core/devformat.h"
 #include "core/device.h"
+#include "core/effects/base.h"
 #include "core/effectslot.h"
 #include "core/filters/biquad.h"
 #include "core/mixer.h"
 #include "intrusive_ptr.h"
 #include "opthelpers.h"
 
+struct BufferStorage;
 
 namespace {
 
@@ -123,8 +124,8 @@ void EchoState::update(const ContextBase *context, const EffectSlot *slot,
 
 void EchoState::process(const size_t samplesToDo, const al::span<const FloatBufferLine> samplesIn, const al::span<FloatBufferLine> samplesOut)
 {
-    const size_t mask{mSampleBuffer.size()-1};
-    float *RESTRICT delaybuf{mSampleBuffer.data()};
+    const auto delaybuf = al::span{mSampleBuffer};
+    const size_t mask{delaybuf.size()-1};
     size_t offset{mOffset};
     size_t tap1{offset - mDelayTap[0]};
     size_t tap2{offset - mDelayTap[1]};
@@ -159,8 +160,8 @@ void EchoState::process(const size_t samplesToDo, const al::span<const FloatBuff
     mOffset = offset;
 
     for(size_t c{0};c < 2;c++)
-        MixSamples({mTempBuffer[c].data(), samplesToDo}, samplesOut, mGains[c].Current.data(),
-            mGains[c].Target.data(), samplesToDo, 0);
+        MixSamples(al::span{mTempBuffer[c]}.first(samplesToDo), samplesOut, mGains[c].Current,
+            mGains[c].Target, samplesToDo, 0);
 }
 
 

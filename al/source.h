@@ -2,27 +2,26 @@
 #define AL_SOURCE_H
 
 #include <array>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <iterator>
 #include <limits>
 #include <string_view>
+#include <utility>
 
 #include "AL/al.h"
 #include "AL/alc.h"
+#include "AL/alext.h"
 
-#include "alc/alu.h"
-#include "alc/context.h"
-#include "alc/inprogext.h"
 #include "almalloc.h"
+#include "alnumbers.h"
 #include "alnumeric.h"
-#include "atomic.h"
+#include "alspan.h"
+#include "core/context.h"
 #include "core/voice.h"
-#include "vector.h"
 
 #ifdef ALSOFT_EAX
+#include "eax/api.h"
 #include "eax/call.h"
 #include "eax/exception.h"
 #include "eax/fx_slot_index.h"
@@ -31,7 +30,7 @@
 
 struct ALbuffer;
 struct ALeffectslot;
-
+enum class Resampler : uint8_t;
 
 enum class SourceStereo : bool {
     Normal = AL_NORMAL_SOFT,
@@ -89,6 +88,7 @@ struct ALsource {
     DirectMode DirectChannels{DirectMode::Off};
     SpatializeMode mSpatialize{SpatializeMode::Auto};
     SourceStereo mStereoMode{SourceStereo::Normal};
+    bool mPanningEnabled{false};
 
     bool DryGainHFAuto{true};
     bool WetGainAuto{true};
@@ -106,15 +106,18 @@ struct ALsource {
 
     float Radius{0.0f};
     float EnhWidth{0.593f};
+    float mPan{0.0f};
 
     /** Direct filter and auxiliary send info. */
-    struct {
+    struct DirectData {
         float Gain{};
         float GainHF{};
         float HFReference{};
         float GainLF{};
         float LFReference{};
-    } Direct;
+    };
+    DirectData Direct;
+
     struct SendData {
         ALeffectslot *Slot{};
         float Gain{};
@@ -152,7 +155,7 @@ struct ALsource {
     ALuint id{0};
 
 
-    ALsource();
+    ALsource() noexcept;
     ~ALsource();
 
     ALsource(const ALsource&) = delete;
@@ -886,7 +889,7 @@ private:
         }
     }
 
-    static void eax_get_active_fx_slot_id(const EaxCall& call, const GUID* ids, size_t max_count);
+    static void eax_get_active_fx_slot_id(const EaxCall& call, const al::span<const GUID> src_ids);
     static void eax1_get(const EaxCall& call, const Eax1Props& props);
     static void eax2_get(const EaxCall& call, const Eax2Props& props);
     static void eax3_get_obstruction(const EaxCall& call, const Eax3Props& props);

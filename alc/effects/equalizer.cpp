@@ -22,24 +22,24 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <functional>
-#include <iterator>
-#include <utility>
+#include <variant>
 
 #include "alc/effects/base.h"
-#include "almalloc.h"
 #include "alspan.h"
 #include "core/ambidefs.h"
 #include "core/bufferline.h"
 #include "core/context.h"
-#include "core/devformat.h"
 #include "core/device.h"
+#include "core/effects/base.h"
 #include "core/effectslot.h"
 #include "core/filters/biquad.h"
 #include "core/mixer.h"
 #include "intrusive_ptr.h"
 
+struct BufferStorage;
 
 namespace {
 
@@ -169,18 +169,17 @@ void EqualizerState::update(const ContextBase *context, const EffectSlot *slot,
 
 void EqualizerState::process(const size_t samplesToDo, const al::span<const FloatBufferLine> samplesIn, const al::span<FloatBufferLine> samplesOut)
 {
-    const al::span<float> buffer{mSampleBuffer.data(), samplesToDo};
-    auto chan = std::begin(mChans);
+    const auto buffer = al::span{mSampleBuffer}.first(samplesToDo);
+    auto chan = mChans.begin();
     for(const auto &input : samplesIn)
     {
-        const size_t outidx{chan->mTargetChannel};
-        if(outidx != InvalidChannelIndex)
+        if(const size_t outidx{chan->mTargetChannel}; outidx != InvalidChannelIndex)
         {
-            const al::span<const float> inbuf{input.data(), samplesToDo};
-            DualBiquad{chan->mFilter[0], chan->mFilter[1]}.process(inbuf, buffer.begin());
-            DualBiquad{chan->mFilter[2], chan->mFilter[3]}.process(buffer, buffer.begin());
+            const auto inbuf = al::span{input}.first(samplesToDo);
+            DualBiquad{chan->mFilter[0], chan->mFilter[1]}.process(inbuf, buffer);
+            DualBiquad{chan->mFilter[2], chan->mFilter[3]}.process(buffer, buffer);
 
-            MixSamples(buffer, samplesOut[outidx].data(), chan->mCurrentGain, chan->mTargetGain,
+            MixSamples(buffer, samplesOut[outidx], chan->mCurrentGain, chan->mTargetGain,
                 samplesToDo);
         }
         ++chan;

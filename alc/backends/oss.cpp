@@ -312,12 +312,12 @@ int OSSPlayback::mixerProc()
             continue;
         }
 
-        std::byte *write_ptr{mMixData.data()};
-        size_t to_write{mMixData.size()};
-        mDevice->renderSamples(write_ptr, static_cast<uint>(to_write/frame_size), frame_step);
-        while(to_write > 0 && !mKillNow.load(std::memory_order_acquire))
+        al::span write_buf{mMixData};
+        mDevice->renderSamples(write_buf.data(), static_cast<uint>(write_buf.size()/frame_size),
+            frame_step);
+        while(!write_buf.empty() && !mKillNow.load(std::memory_order_acquire))
         {
-            ssize_t wrote{write(mFd, write_ptr, to_write)};
+            ssize_t wrote{write(mFd, write_buf.data(), write_buf.size())};
             if(wrote < 0)
             {
                 if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
@@ -328,8 +328,7 @@ int OSSPlayback::mixerProc()
                 break;
             }
 
-            to_write -= static_cast<size_t>(wrote);
-            write_ptr += wrote;
+            write_buf = write_buf.subspan(static_cast<size_t>(wrote));
         }
     }
 
@@ -669,18 +668,13 @@ bool OSSBackendFactory::init()
 bool OSSBackendFactory::querySupport(BackendType type)
 { return (type == BackendType::Playback || type == BackendType::Capture); }
 
-std::string OSSBackendFactory::probe(BackendType type)
+auto OSSBackendFactory::enumerate(BackendType type) -> std::vector<std::string>
 {
-    std::string outnames;
-
+    std::vector<std::string> outnames;
     auto add_device = [&outnames](const DevMap &entry) -> void
     {
-        struct stat buf;
-        if(stat(entry.device_name.c_str(), &buf) == 0)
-        {
-            /* Includes null char. */
-            outnames.append(entry.name.c_str(), entry.name.length()+1);
-        }
+        if(struct stat buf{}; stat(entry.device_name.c_str(), &buf) == 0)
+            outnames.emplace_back(entry.name);
     };
 
     switch(type)
@@ -688,12 +682,14 @@ std::string OSSBackendFactory::probe(BackendType type)
     case BackendType::Playback:
         PlaybackDevices.clear();
         ALCossListPopulate(PlaybackDevices, DSP_CAP_OUTPUT);
+        outnames.reserve(PlaybackDevices.size());
         std::for_each(PlaybackDevices.cbegin(), PlaybackDevices.cend(), add_device);
         break;
 
     case BackendType::Capture:
         CaptureDevices.clear();
         ALCossListPopulate(CaptureDevices, DSP_CAP_INPUT);
+        outnames.reserve(CaptureDevices.size());
         std::for_each(CaptureDevices.cbegin(), CaptureDevices.cend(), add_device);
         break;
     }

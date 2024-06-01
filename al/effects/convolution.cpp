@@ -1,12 +1,16 @@
 
 #include "config.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 
 #include "AL/al.h"
-#include "alc/inprogext.h"
 
-#include "alc/effects/base.h"
+#include "alc/inprogext.h"
+#include "alnumeric.h"
+#include "alspan.h"
+#include "core/effects/base.h"
 #include "effects.h"
 
 
@@ -24,7 +28,7 @@ constexpr EffectProps genDefaultProps() noexcept
 
 const EffectProps ConvolutionEffectProps{genDefaultProps()};
 
-void EffectHandler::SetParami(ConvolutionProps& /*props*/, ALenum param, int /*val*/)
+void ConvolutionEffectHandler::SetParami(ConvolutionProps& /*props*/, ALenum param, int /*val*/)
 {
     switch(param)
     {
@@ -33,15 +37,15 @@ void EffectHandler::SetParami(ConvolutionProps& /*props*/, ALenum param, int /*v
             param};
     }
 }
-void EffectHandler::SetParamiv(ConvolutionProps &props, ALenum param, const int *vals)
+void ConvolutionEffectHandler::SetParamiv(ConvolutionProps &props, ALenum param, const int *vals)
 {
     switch(param)
     {
     default:
-        SetParami(props, param, vals[0]);
+        SetParami(props, param, *vals);
     }
 }
-void EffectHandler::SetParamf(ConvolutionProps& /*props*/, ALenum param, float /*val*/)
+void ConvolutionEffectHandler::SetParamf(ConvolutionProps& /*props*/, ALenum param, float /*val*/)
 {
     switch(param)
     {
@@ -50,29 +54,27 @@ void EffectHandler::SetParamf(ConvolutionProps& /*props*/, ALenum param, float /
             param};
     }
 }
-void EffectHandler::SetParamfv(ConvolutionProps &props, ALenum param, const float *values)
+void ConvolutionEffectHandler::SetParamfv(ConvolutionProps &props, ALenum param, const float *values)
 {
+    static constexpr auto finite_checker = [](float val) -> bool { return std::isfinite(val); };
+    al::span<const float> vals;
     switch(param)
     {
     case AL_CONVOLUTION_ORIENTATION_SOFT:
-        if(!(std::isfinite(values[0]) && std::isfinite(values[1]) && std::isfinite(values[2])
-            && std::isfinite(values[3]) && std::isfinite(values[4]) && std::isfinite(values[5])))
+        vals = {values, 6_uz};
+        if(!std::all_of(vals.cbegin(), vals.cend(), finite_checker))
             throw effect_exception{AL_INVALID_VALUE, "Property 0x%04x value out of range", param};
 
-        props.OrientAt[0] = values[0];
-        props.OrientAt[1] = values[1];
-        props.OrientAt[2] = values[2];
-        props.OrientUp[0] = values[3];
-        props.OrientUp[1] = values[4];
-        props.OrientUp[2] = values[5];
+        std::copy_n(vals.cbegin(), props.OrientAt.size(), props.OrientAt.begin());
+        std::copy_n(vals.cbegin()+3, props.OrientUp.size(), props.OrientUp.begin());
         break;
 
     default:
-        SetParamf(props, param, values[0]);
+        SetParamf(props, param, *values);
     }
 }
 
-void EffectHandler::GetParami(const ConvolutionProps& /*props*/, ALenum param, int* /*val*/)
+void ConvolutionEffectHandler::GetParami(const ConvolutionProps& /*props*/, ALenum param, int* /*val*/)
 {
     switch(param)
     {
@@ -81,7 +83,7 @@ void EffectHandler::GetParami(const ConvolutionProps& /*props*/, ALenum param, i
             param};
     }
 }
-void EffectHandler::GetParamiv(const ConvolutionProps &props, ALenum param, int *vals)
+void ConvolutionEffectHandler::GetParamiv(const ConvolutionProps &props, ALenum param, int *vals)
 {
     switch(param)
     {
@@ -89,7 +91,7 @@ void EffectHandler::GetParamiv(const ConvolutionProps &props, ALenum param, int 
         GetParami(props, param, vals);
     }
 }
-void EffectHandler::GetParamf(const ConvolutionProps& /*props*/, ALenum param, float* /*val*/)
+void ConvolutionEffectHandler::GetParamf(const ConvolutionProps& /*props*/, ALenum param, float* /*val*/)
 {
     switch(param)
     {
@@ -98,17 +100,15 @@ void EffectHandler::GetParamf(const ConvolutionProps& /*props*/, ALenum param, f
             param};
     }
 }
-void EffectHandler::GetParamfv(const ConvolutionProps &props, ALenum param, float *values)
+void ConvolutionEffectHandler::GetParamfv(const ConvolutionProps &props, ALenum param, float *values)
 {
+    al::span<float> vals;
     switch(param)
     {
     case AL_CONVOLUTION_ORIENTATION_SOFT:
-        values[0] = props.OrientAt[0];
-        values[1] = props.OrientAt[1];
-        values[2] = props.OrientAt[2];
-        values[3] = props.OrientUp[0];
-        values[4] = props.OrientUp[1];
-        values[5] = props.OrientUp[2];
+        vals = {values, 6_uz};
+        std::copy(props.OrientAt.cbegin(), props.OrientAt.cend(), vals.begin());
+        std::copy(props.OrientUp.cbegin(), props.OrientUp.cend(), vals.begin()+3);
         break;
 
     default:

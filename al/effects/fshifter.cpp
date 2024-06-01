@@ -13,6 +13,7 @@
 #ifdef ALSOFT_EAX
 #include <cassert>
 #include "alnumeric.h"
+#include "al/eax/effect.h"
 #include "al/eax/exception.h"
 #include "al/eax/utils.h"
 #endif // ALSOFT_EAX
@@ -54,7 +55,7 @@ constexpr EffectProps genDefaultProps() noexcept
 
 const EffectProps FshifterEffectProps{genDefaultProps()};
 
-void EffectHandler::SetParami(FshifterProps &props, ALenum param, int val)
+void FshifterEffectHandler::SetParami(FshifterProps &props, ALenum param, int val)
 {
     switch(param)
     {
@@ -79,10 +80,10 @@ void EffectHandler::SetParami(FshifterProps &props, ALenum param, int val)
             "Invalid frequency shifter integer property 0x%04x", param};
     }
 }
-void EffectHandler::SetParamiv(FshifterProps &props, ALenum param, const int *vals)
-{ SetParami(props, param, vals[0]); }
+void FshifterEffectHandler::SetParamiv(FshifterProps &props, ALenum param, const int *vals)
+{ SetParami(props, param, *vals); }
 
-void EffectHandler::SetParamf(FshifterProps &props, ALenum param, float val)
+void FshifterEffectHandler::SetParamf(FshifterProps &props, ALenum param, float val)
 {
     switch(param)
     {
@@ -97,10 +98,10 @@ void EffectHandler::SetParamf(FshifterProps &props, ALenum param, float val)
             param};
     }
 }
-void EffectHandler::SetParamfv(FshifterProps &props, ALenum param, const float *vals)
-{ SetParamf(props, param, vals[0]); }
+void FshifterEffectHandler::SetParamfv(FshifterProps &props, ALenum param, const float *vals)
+{ SetParamf(props, param, *vals); }
 
-void EffectHandler::GetParami(const FshifterProps &props, ALenum param, int *val)
+void FshifterEffectHandler::GetParami(const FshifterProps &props, ALenum param, int *val)
 {
     switch(param)
     {
@@ -116,10 +117,10 @@ void EffectHandler::GetParami(const FshifterProps &props, ALenum param, int *val
             "Invalid frequency shifter integer property 0x%04x", param};
     }
 }
-void EffectHandler::GetParamiv(const FshifterProps &props, ALenum param, int *vals)
+void FshifterEffectHandler::GetParamiv(const FshifterProps &props, ALenum param, int *vals)
 { GetParami(props, param, vals); }
 
-void EffectHandler::GetParamf(const FshifterProps &props, ALenum param, float *val)
+void FshifterEffectHandler::GetParamf(const FshifterProps &props, ALenum param, float *val)
 {
     switch(param)
     {
@@ -132,7 +133,7 @@ void EffectHandler::GetParamf(const FshifterProps &props, ALenum param, float *v
             param};
     }
 }
-void EffectHandler::GetParamfv(const FshifterProps &props, ALenum param, float *vals)
+void FshifterEffectHandler::GetParamfv(const FshifterProps &props, ALenum param, float *vals)
 { GetParamf(props, param, vals); }
 
 

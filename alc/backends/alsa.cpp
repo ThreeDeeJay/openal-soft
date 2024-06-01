@@ -452,6 +452,17 @@ int verify_state(snd_pcm_t *handle)
 
         case SND_PCM_STATE_DISCONNECTED:
             return -ENODEV;
+
+        /* ALSA headers have made this enum public, leaving us in a bind: use
+         * the enum despite being private and internal to the libasound, or
+         * ignore when an enum value isn't handled. We can't rely on it being
+         * declared either, since older headers don't have it and it could be
+         * removed in the future. We can't even really rely on its value, since
+         * being private/internal means it's subject to change, but this is the
+         * best we can do.
+         */
+        case 1024 /*SND_PCM_STATE_PRIVATE1*/:
+            assert(state != 1024);
     }
 
     return state;
@@ -556,6 +567,7 @@ int AlsaPlayback::mixerProc()
                 break;
             }
 
+            /* NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) */
             char *WritePtr{static_cast<char*>(areas->addr) + (offset * areas->step / 8)};
             mDevice->renderSamples(WritePtr, static_cast<uint>(frames), mFrameStep);
 
@@ -621,13 +633,13 @@ int AlsaPlayback::mixerNoMMapProc()
             continue;
         }
 
-        std::byte *WritePtr{mBuffer.data()};
+        auto WritePtr = mBuffer.begin();
         avail = snd_pcm_bytes_to_frames(mPcmHandle, static_cast<ssize_t>(mBuffer.size()));
         std::lock_guard<std::mutex> dlock{mMutex};
-        mDevice->renderSamples(WritePtr, static_cast<uint>(avail), mFrameStep);
+        mDevice->renderSamples(al::to_address(WritePtr), static_cast<uint>(avail), mFrameStep);
         while(avail > 0)
         {
-            snd_pcm_sframes_t ret{snd_pcm_writei(mPcmHandle, WritePtr,
+            snd_pcm_sframes_t ret{snd_pcm_writei(mPcmHandle, al::to_address(WritePtr),
                 static_cast<snd_pcm_uframes_t>(avail))};
             switch(ret)
             {
@@ -884,9 +896,8 @@ void AlsaPlayback::stop()
 
 ClockLatency AlsaPlayback::getClockLatency()
 {
-    ClockLatency ret;
-
     std::lock_guard<std::mutex> dlock{mMutex};
+    ClockLatency ret{};
     ret.ClockTime = mDevice->getClockTime();
     snd_pcm_sframes_t delay{};
     int err{snd_pcm_delay(mPcmHandle, &delay)};
@@ -1074,6 +1085,9 @@ void AlsaCapture::captureSamples(std::byte *buffer, uint samples)
         return;
     }
 
+    const auto outspan = al::span{buffer,
+        static_cast<size_t>(snd_pcm_frames_to_bytes(mPcmHandle, samples))};
+    auto outiter = outspan.begin();
     mLastAvail -= samples;
     while(mDevice->Connected.load(std::memory_order_acquire) && samples > 0)
     {
@@ -1086,13 +1100,13 @@ void AlsaCapture::captureSamples(std::byte *buffer, uint samples)
             if(static_cast<snd_pcm_uframes_t>(amt) > samples) amt = samples;
 
             amt = snd_pcm_frames_to_bytes(mPcmHandle, amt);
-            std::copy_n(mBuffer.begin(), amt, buffer);
+            std::copy_n(mBuffer.begin(), amt, outiter);
 
             mBuffer.erase(mBuffer.begin(), mBuffer.begin()+amt);
             amt = snd_pcm_bytes_to_frames(mPcmHandle, amt);
         }
         else if(mDoCapture)
-            amt = snd_pcm_readi(mPcmHandle, buffer, samples);
+            amt = snd_pcm_readi(mPcmHandle, al::to_address(outiter), samples);
         if(amt < 0)
         {
             ERR("read error: %s\n", snd_strerror(static_cast<int>(amt)));
@@ -1120,11 +1134,11 @@ void AlsaCapture::captureSamples(std::byte *buffer, uint samples)
             continue;
         }
 
-        buffer = buffer + amt;
+        outiter += amt;
         samples -= static_cast<uint>(amt);
     }
     if(samples > 0)
-        std::fill_n(buffer, snd_pcm_frames_to_bytes(mPcmHandle, samples),
+        std::fill_n(outiter, snd_pcm_frames_to_bytes(mPcmHandle, samples),
             std::byte((mDevice->FmtType == DevFmtUByte) ? 0x80 : 0));
 }
 
@@ -1202,8 +1216,7 @@ uint AlsaCapture::availableSamples()
 
 ClockLatency AlsaCapture::getClockLatency()
 {
-    ClockLatency ret;
-
+    ClockLatency ret{};
     ret.ClockTime = mDevice->getClockTime();
     snd_pcm_sframes_t delay{};
     int err{snd_pcm_delay(mPcmHandle, &delay)};
@@ -1257,26 +1270,23 @@ bool AlsaBackendFactory::init()
 bool AlsaBackendFactory::querySupport(BackendType type)
 { return (type == BackendType::Playback || type == BackendType::Capture); }
 
-std::string AlsaBackendFactory::probe(BackendType type)
+auto AlsaBackendFactory::enumerate(BackendType type) -> std::vector<std::string>
 {
-    std::string outnames;
-
+    std::vector<std::string> outnames;
     auto add_device = [&outnames](const DevMap &entry) -> void
-    {
-        /* +1 to also append the null char (to ensure a null-separated list and
-         * double-null terminated list).
-         */
-        outnames.append(entry.name.c_str(), entry.name.length()+1);
-    };
+    { outnames.emplace_back(entry.name); };
+
     switch(type)
     {
     case BackendType::Playback:
         PlaybackDevices = probe_devices(SND_PCM_STREAM_PLAYBACK);
+        outnames.reserve(PlaybackDevices.size());
         std::for_each(PlaybackDevices.cbegin(), PlaybackDevices.cend(), add_device);
         break;
 
     case BackendType::Capture:
         CaptureDevices = probe_devices(SND_PCM_STREAM_CAPTURE);
+        outnames.reserve(CaptureDevices.size());
         std::for_each(CaptureDevices.cbegin(), CaptureDevices.cend(), add_device);
         break;
     }
