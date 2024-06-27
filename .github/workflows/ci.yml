@@ -11,91 +11,10 @@ jobs:
       matrix:
         config:
         - {
-            name: "Win32-Release",
-            os: windows-latest,
-            cmake_opts: "-A Win32 \
-              -DALSOFT_TESTS=ON \
-              -DALSOFT_BUILD_ROUTER=ON \
-              -DALSOFT_REQUIRE_WINMM=ON \
-              -DALSOFT_REQUIRE_DSOUND=ON \
-              -DALSOFT_REQUIRE_WASAPI=ON",
-            build_type: "Release"
-          }
-        - {
-            name: "Win32-Debug",
-            os: windows-latest,
-            cmake_opts: "-A Win32 \
-              -DALSOFT_TESTS=ON \
-              -DALSOFT_BUILD_ROUTER=ON \
-              -DALSOFT_REQUIRE_WINMM=ON \
-              -DALSOFT_REQUIRE_DSOUND=ON \
-              -DALSOFT_REQUIRE_WASAPI=ON",
-            build_type: "Debug"
-          }
-        - {
-            name: "Win64-Release",
-            os: windows-latest,
-            cmake_opts: "-A x64 \
-              -DALSOFT_TESTS=ON \
-              -DALSOFT_BUILD_ROUTER=ON \
-              -DALSOFT_REQUIRE_WINMM=ON \
-              -DALSOFT_REQUIRE_DSOUND=ON \
-              -DALSOFT_REQUIRE_WASAPI=ON",
-            build_type: "Release"
-          }
-        - {
-            name: "Win64-Debug",
-            os: windows-latest,
-            cmake_opts: "-A x64 \
-              -DALSOFT_TESTS=ON \
-              -DALSOFT_BUILD_ROUTER=ON \
-              -DALSOFT_REQUIRE_WINMM=ON \
-              -DALSOFT_REQUIRE_DSOUND=ON \
-              -DALSOFT_REQUIRE_WASAPI=ON",
-            build_type: "Debug"
-          }
-        - {
-            name: "Win64-UWP",
-            os: windows-latest,
-            cmake_opts: "-A x64 \
-              -DALSOFT_TESTS=OFF \
-              -DCMAKE_SYSTEM_NAME=WindowsStore \
-              \"-DCMAKE_SYSTEM_VERSION=10.0\" \
-              -DALSOFT_BUILD_ROUTER=ON \
-              -DALSOFT_REQUIRE_WASAPI=ON",
-            build_type: "Release"
-          }
-        - {
-            name: "macOS-Release",
-            os: macos-latest,
-            cmake_opts: "-DALSOFT_REQUIRE_COREAUDIO=ON \
-              -DALSOFT_TESTS=ON",
-            build_type: "Release"
-          }
-        - {
-            name: "iOS-Release",
-            os: macos-latest,
-            cmake_opts: "-GXcode \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DALSOFT_REQUIRE_COREAUDIO=ON \
-            -DALSOFT_UTILS=OFF \
-            -DALSOFT_EXAMPLES=OFF \
-            -DALSOFT_TESTS=OFF \
-            -DALSOFT_INSTALL=OFF \
-            \"-DCMAKE_OSX_ARCHITECTURES=arm64\"",
-            build_type: "Release"
-          }
-        - {
-            name: "Linux-Release",
+            name: "Android-Release",
             os: ubuntu-latest,
-            cmake_opts: "-DALSOFT_REQUIRE_RTKIT=ON \
-              -DALSOFT_REQUIRE_ALSA=ON \
-              -DALSOFT_REQUIRE_OSS=ON \
-              -DALSOFT_REQUIRE_PORTAUDIO=ON \
-              -DALSOFT_REQUIRE_PULSEAUDIO=ON \
-              -DALSOFT_REQUIRE_JACK=ON \
-              -DALSOFT_REQUIRE_PIPEWIRE=ON \
-              -DALSOFT_TESTS=ON",
+            cmake_opts: "-DANDROID_STL=c++_shared \
+            -DCMAKE_TOOLCHAIN_FILE=${ndk_root}/build/cmake/android.toolchain.cmake",
             deps_cmdline: "sudo apt update && sudo apt-get install -qq \
               libpulse-dev \
               portaudio19-dev \
@@ -106,9 +25,13 @@ jobs:
               libdbus-1-dev",
             build_type: "Release"
           }
-
     steps:
     - uses: actions/checkout@v3
+
+    - name: Setup Android NDK
+      uses: nttld/setup-ndk@v1.5.0
+      with:
+        ndk-version: r26d
 
     - name: Install Dependencies
       shell: bash
