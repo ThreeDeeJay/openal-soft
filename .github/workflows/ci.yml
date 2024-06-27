@@ -16,7 +16,7 @@ jobs:
             cmake_opts: "-DANDROID_STL=c++_shared \
             -DCMAKE_TOOLCHAIN_FILE=build/cmake/android.toolchain.cmake \
             -DALSOFT_EMBED_HRTF_DATA=TRUE \
-            -ALSOFT_REQUIRE_OPENSL=ON",
+            -DALSOFT_REQUIRE_OPENSL=ON",
             deps_cmdline: "sudo apt update && sudo apt-get install -qq \
               libpulse-dev \
               portaudio19-dev \
