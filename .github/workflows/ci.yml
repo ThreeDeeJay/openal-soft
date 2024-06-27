@@ -29,7 +29,8 @@ jobs:
           }
 
     steps:
-    - uses: actions/checkout@v3
+    - name: Clone repository
+      run: git clone --recurse-submodules https://github.com/${{github.repository}}.git . --branch 1.23.0
 
     - name: Install Dependencies
       shell: bash
