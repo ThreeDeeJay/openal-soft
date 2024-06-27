@@ -30,7 +30,9 @@ jobs:
 
     steps:
     - name: Clone repository
-      run: git clone --recurse-submodules https://github.com/kcat/openal-soft.git . --branch 1.23.1
+      run: |
+        git clone --recurse-submodules https://github.com/kcat/openal-soft.git .
+        git checkout 32de7572ea2f97fd87f94cbf0843b6aaa551b560
 
     - name: Install Dependencies
       shell: bash
