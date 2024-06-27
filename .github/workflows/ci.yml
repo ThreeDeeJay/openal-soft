@@ -48,6 +48,7 @@ jobs:
       shell: bash
       run: |
         cmake --build build --config ${{matrix.config.build_type}}
+        ls -R
 
     - name: Test
       shell: bash
