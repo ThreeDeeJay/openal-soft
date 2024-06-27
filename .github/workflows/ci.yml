@@ -31,24 +31,11 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
-    - name: Setup Android NDK
-      uses: nttld/setup-ndk@v1.5.0
-      with:
-        ndk-version: r26d
-#In case anyone is looking for a quick fix the problematic code is in config.h
-#define SIZEOF_VOIDP 4
-#on 64 bits this needs to be 8
-
     - shell: bash
-      run: mkdir toolchains
-    - name: specify NDK
-      uses: tomasreyes/android-ndk-toolchain-setup@master
-      with:
-        api: '21'
-        arch: 'arm64-v8a'
-        install-location: 'toolchains'
-        force: true
-
+      run: |
+        mkdir toolchains
+        cd /
+        ls -R
 
     - name: Install Dependencies
       shell: bash
@@ -60,8 +47,6 @@ jobs:
     - name: Configure
       shell: bash
       run: |
-        cd /
-        ls -R
         cmake -B build -DCMAKE_BUILD_TYPE=${{matrix.config.build_type}} ${{matrix.config.cmake_opts}} .
 
     - name: Build
