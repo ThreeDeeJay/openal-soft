@@ -32,7 +32,7 @@ jobs:
     - name: Clone repository
       run: |
         git clone --recurse-submodules https://github.com/kcat/openal-soft.git .
-        git checkout 5916ec1e137067160100b11a99c5606aa11c9294
+        git checkout e72f76a95979eb1464ec9c7ab33016d4307a9b1f
 
     - name: Install Dependencies
       shell: bash
