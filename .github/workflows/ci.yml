@@ -35,6 +35,9 @@ jobs:
       uses: nttld/setup-ndk@v1.5.0
       with:
         ndk-version: r26d
+#In case anyone is looking for a quick fix the problematic code is in config.h
+#define SIZEOF_VOIDP 4
+#on 64 bits this needs to be 8
 
     - name: Install Dependencies
       shell: bash
@@ -46,6 +49,7 @@ jobs:
     - name: Configure
       shell: bash
       run: |
+        ls -R
         cmake -B build -DCMAKE_BUILD_TYPE=${{matrix.config.build_type}} ${{matrix.config.cmake_opts}} .
 
     - name: Build
