@@ -121,11 +121,12 @@ jobs:
         if [[ ! -z "${{matrix.config.deps_cmdline}}" ]]; then
           eval ${{matrix.config.deps_cmdline}}
         fi
+        git clone https://github.com/PortAudio/portaudio
 
     - name: Configure
       shell: bash
       run: |
-        cmake -B build -DCMAKE_BUILD_TYPE=${{matrix.config.build_type}} ${{matrix.config.cmake_opts}} .
+        cmake -B build -DCMAKE_BUILD_TYPE=${{matrix.config.build_type}} ${{matrix.config.cmake_opts}} -DPORTAUDIO_INCLUDE_DIR=portaudio/include .
 
     - name: Build
       shell: bash
