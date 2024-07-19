@@ -122,6 +122,10 @@ jobs:
           eval ${{matrix.config.deps_cmdline}}
         fi
         git clone https://github.com/PortAudio/portaudio
+        cd portaudio
+        ./configure
+        make
+        make install
 
     - name: Configure
       shell: bash
