@@ -18,7 +18,8 @@ jobs:
               -DALSOFT_BUILD_ROUTER=ON \
               -DALSOFT_REQUIRE_WINMM=ON \
               -DALSOFT_REQUIRE_DSOUND=ON \
-              -DALSOFT_REQUIRE_WASAPI=ON",
+              -DALSOFT_REQUIRE_WASAPI=ON \
+              -DALSOFT_REQUIRE_PORTAUDIO=ON",
             build_type: "Release"
           }
         - {
@@ -29,7 +30,8 @@ jobs:
               -DALSOFT_BUILD_ROUTER=ON \
               -DALSOFT_REQUIRE_WINMM=ON \
               -DALSOFT_REQUIRE_DSOUND=ON \
-              -DALSOFT_REQUIRE_WASAPI=ON",
+              -DALSOFT_REQUIRE_WASAPI=ON \
+              -DALSOFT_REQUIRE_PORTAUDIO=ON",
             build_type: "Debug"
           }
         - {
@@ -40,7 +42,8 @@ jobs:
               -DALSOFT_BUILD_ROUTER=ON \
               -DALSOFT_REQUIRE_WINMM=ON \
               -DALSOFT_REQUIRE_DSOUND=ON \
-              -DALSOFT_REQUIRE_WASAPI=ON",
+              -DALSOFT_REQUIRE_WASAPI=ON \
+              -DALSOFT_REQUIRE_PORTAUDIO=ON",
             build_type: "Release"
           }
         - {
@@ -51,7 +54,8 @@ jobs:
               -DALSOFT_BUILD_ROUTER=ON \
               -DALSOFT_REQUIRE_WINMM=ON \
               -DALSOFT_REQUIRE_DSOUND=ON \
-              -DALSOFT_REQUIRE_WASAPI=ON",
+              -DALSOFT_REQUIRE_WASAPI=ON \
+              -DALSOFT_REQUIRE_PORTAUDIO=ON",
             build_type: "Debug"
           }
         - {
@@ -62,7 +66,8 @@ jobs:
               -DCMAKE_SYSTEM_NAME=WindowsStore \
               \"-DCMAKE_SYSTEM_VERSION=10.0\" \
               -DALSOFT_BUILD_ROUTER=ON \
-              -DALSOFT_REQUIRE_WASAPI=ON",
+              -DALSOFT_REQUIRE_WASAPI=ON \
+              -DALSOFT_REQUIRE_PORTAUDIO=ON",
             build_type: "Release"
           }
         - {
