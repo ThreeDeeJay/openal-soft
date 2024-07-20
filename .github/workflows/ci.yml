@@ -141,7 +141,7 @@ jobs:
     - name: Configure
       shell: bash
       run: |
-        cmake -B build -DCMAKE_BUILD_TYPE=${{matrix.config.build_type}} ${{matrix.config.cmake_opts}} -DPORTAUDIO_INCLUDE_DIR=portaudio/include -DPORTAUDIO_LIBRARY=build/Release/portaudio_${{matrix.config.arch}}.lib .
+        cmake -B build -DCMAKE_BUILD_TYPE=${{matrix.config.build_type}} ${{matrix.config.cmake_opts}} -DPORTAUDIO_INCLUDE_DIR=portaudio/include -DPORTAUDIO_LIBRARY=build/Release/portaudio_${{matrix.config.arch}}.lib . --target clean
     - name: Build
       shell: bash
       run: |
