@@ -123,7 +123,7 @@ jobs:
         curl -L -o asiosdk.zip https://www.steinberg.net/asiosdk
         7z x asiosdk.zip
         cmake -S portaudio -B build ${{matrix.config.cmake_opts}} -D PA_USE_ASIO=ON
-        cmake --build build --config Release
+        cmake --build build --config Release --target clean
         rm portaudio/CMakeLists.txt
         ls -R
 
@@ -141,8 +141,7 @@ jobs:
     - name: Configure
       shell: bash
       run: |
-        cmake --target clean -B build -DCMAKE_BUILD_TYPE=${{matrix.config.build_type}} ${{matrix.config.cmake_opts}} -DPORTAUDIO_INCLUDE_DIR=portaudio/include -DPORTAUDIO_LIBRARY=build/Release/portaudio_${{matrix.config.arch}}.lib .
-
+        cmake -B build -DCMAKE_BUILD_TYPE=${{matrix.config.build_type}} ${{matrix.config.cmake_opts}} -DPORTAUDIO_INCLUDE_DIR=portaudio/include -DPORTAUDIO_LIBRARY=build/Release/portaudio_${{matrix.config.arch}}.lib .
     - name: Build
       shell: bash
       run: |
