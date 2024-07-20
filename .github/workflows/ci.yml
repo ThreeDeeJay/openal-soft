@@ -121,7 +121,7 @@ jobs:
         git clone https://github.com/PortAudio/portaudio --branch v19.7.0
         curl -L -o asiosdk.zip https://www.steinberg.net/asiosdk
         7z x asiosdk.zip
-        cmake -S portaudio -B build -A ${{ matrix.platform }} -D PA_USE_ASIO=ON
+        cmake -S portaudio -B build ${{matrix.config.cmake_opts}} -D PA_USE_ASIO=ON
         cmake --build build --config Release
         ls -R
 
