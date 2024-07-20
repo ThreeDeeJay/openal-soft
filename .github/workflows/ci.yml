@@ -19,7 +19,7 @@ jobs:
               -DALSOFT_REQUIRE_WINMM=ON \
               -DALSOFT_REQUIRE_DSOUND=ON \
               -DALSOFT_REQUIRE_WASAPI=ON \
-              -DALSOFT_REQUIRE_PORTAUDIO=ON"
+              -DALSOFT_REQUIRE_PORTAUDIO=ON",
             build_type: "Release",
             arch: "x86"
           }
