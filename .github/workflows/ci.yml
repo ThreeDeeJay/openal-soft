@@ -119,7 +119,7 @@ jobs:
 
     - name: Build portaudio with ASIO
       run: |
-        git clone https://github.com/PortAudio/portaudio --branch v19.7.0
+        git clone https://github.com/PortAudio/portaudio
         curl -L -o asiosdk.zip https://www.steinberg.net/asiosdk
         7z x asiosdk.zip
         cmake -S portaudio -B portaudio/build ${{matrix.config.cmake_opts}} -D PA_USE_ASIO=ON
