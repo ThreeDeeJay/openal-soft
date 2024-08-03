@@ -30,10 +30,8 @@ jobs:
           eval ${{matrix.config.deps_cmdline}}
         fi
         echo 0 "/usr/local/lib/android/sdk/ndk/26.3.11579264/build/cmake/android.toolchain.cmake"
-        echo 1 "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
         echo 2 "ANDROID_NDK_HOME=${{$ANDROID_NDK_HOME}}"
         echo 3 "ANDROID_NDK_HOME=${{ANDROID_NDK_HOME}}"
-        echo 5 "ANDROID_NDK_HOME=$ANDROID_NDK_PATH"
         echo 6 "ANDROID_NDK_HOME=${{$ANDROID_NDK_PATH}}"
         echo 7 "ANDROID_NDK_HOME=${{ANDROID_NDK_PATH}}"
 
