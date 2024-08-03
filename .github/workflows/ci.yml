@@ -33,11 +33,9 @@ jobs:
         echo 1 "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
         echo 2 "ANDROID_NDK_HOME=${{$ANDROID_NDK_HOME}}"
         echo 3 "ANDROID_NDK_HOME=${{ANDROID_NDK_HOME}}"
-        echo 4 "ANDROID_NDK_HOME=${{android.ndk.home}}"
         echo 5 "ANDROID_NDK_HOME=$ANDROID_NDK_PATH"
         echo 6 "ANDROID_NDK_HOME=${{$ANDROID_NDK_PATH}}"
         echo 7 "ANDROID_NDK_HOME=${{ANDROID_NDK_PATH}}"
-        echo 8 "ANDROID_NDK_HOME=${{android.ndk.path}}"
 
     - name: Configure
       shell: bash
