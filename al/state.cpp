@@ -62,7 +62,7 @@
 
 namespace {
 
-[[nodiscard]] constexpr auto GetVendorString() noexcept { return "OpenAL Community"; }
+[[nodiscard]] constexpr auto GetVendorString() noexcept { return "Creative Labs Inc."; }
 [[nodiscard]] constexpr auto GetVersionString() noexcept { return "1.1 ALSOFT " ALSOFT_VERSION; }
 [[nodiscard]] constexpr auto GetRendererString() noexcept { return "OpenAL Soft"; }
 
