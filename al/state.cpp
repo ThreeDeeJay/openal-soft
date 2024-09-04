@@ -64,7 +64,7 @@ namespace {
 
 [[nodiscard]] constexpr auto GetVendorString() noexcept { return "Creative Labs Inc."; }
 [[nodiscard]] constexpr auto GetVersionString() noexcept { return "1.1"; }
-[[nodiscard]] constexpr auto GetRendererString() noexcept { return "OpenAL Soft"; }
+[[nodiscard]] constexpr auto GetRendererString() noexcept { return "Software"; }
 
 /* Error Messages */
 [[nodiscard]] constexpr auto GetNoErrorString() noexcept { return "No Error"; }
