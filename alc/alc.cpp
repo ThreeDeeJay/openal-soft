@@ -269,7 +269,7 @@ BackendFactory *CaptureFactory{};
 [[nodiscard]] constexpr auto GetInvalidValueString() noexcept { return "Invalid Value"; }
 [[nodiscard]] constexpr auto GetOutOfMemoryString() noexcept { return "Out of Memory"; }
 
-[[nodiscard]] constexpr auto GetDefaultName() noexcept { return "Generic Software\0"; }
+[[nodiscard]] constexpr auto GetDefaultName() noexcept { return "Creative SB X-Fi\0"; }
 
 /************************************************
  * Global variables
