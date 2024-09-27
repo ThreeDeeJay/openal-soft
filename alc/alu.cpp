@@ -434,11 +434,19 @@ bool CalcContextParams(ContextBase *ctx)
     ctx->mParams.Velocity = rot * vel;
 
     ctx->mParams.Gain = props->Gain * ctx->mGainBoost;
-    ctx->mParams.MetersPerUnit = props->MetersPerUnit;
+    ctx->mParams.MetersPerUnit = props->MetersPerUnit
+#ifdef ALSOFT_EAX
+        * props->DistanceFactor
+#endif
+        ;
     ctx->mParams.AirAbsorptionGainHF = props->AirAbsorptionGainHF;
 
     ctx->mParams.DopplerFactor = props->DopplerFactor;
-    ctx->mParams.SpeedOfSound = props->SpeedOfSound * props->DopplerVelocity;
+    ctx->mParams.SpeedOfSound = props->SpeedOfSound * props->DopplerVelocity
+#ifdef ALSOFT_EAX
+        / props->DistanceFactor
+#endif
+        ;
 
     ctx->mParams.SourceDistanceModel = props->SourceDistanceModel;
     ctx->mParams.mDistanceModel = props->mDistanceModel;
@@ -462,23 +470,27 @@ bool CalcEffectSlotParams(EffectSlot *slot, EffectSlot **sorted_slots, ContextBa
     slot->Target = props->Target;
     slot->EffectType = props->Type;
     slot->mEffectProps = props->Props;
+
+    slot->RoomRolloff = 0.0f;
+    slot->DecayTime = 0.0f;
+    slot->DecayLFRatio = 0.0f;
+    slot->DecayHFRatio = 0.0f;
+    slot->DecayHFLimit = false;
+    slot->AirAbsorptionGainHF = 1.0f;
     if(auto *reverbprops = std::get_if<ReverbProps>(&props->Props))
     {
         slot->RoomRolloff = reverbprops->RoomRolloffFactor;
-        slot->DecayTime = reverbprops->DecayTime;
-        slot->DecayLFRatio = reverbprops->DecayLFRatio;
-        slot->DecayHFRatio = reverbprops->DecayHFRatio;
-        slot->DecayHFLimit = reverbprops->DecayHFLimit;
         slot->AirAbsorptionGainHF = reverbprops->AirAbsorptionGainHF;
-    }
-    else
-    {
-        slot->RoomRolloff = 0.0f;
-        slot->DecayTime = 0.0f;
-        slot->DecayLFRatio = 0.0f;
-        slot->DecayHFRatio = 0.0f;
-        slot->DecayHFLimit = false;
-        slot->AirAbsorptionGainHF = 1.0f;
+        /* If this effect slot's Auxiliary Send Auto is off, don't apply the
+         * automatic send adjustments based on source distance.
+         */
+        if(slot->AuxSendAuto)
+        {
+            slot->DecayTime = reverbprops->DecayTime;
+            slot->DecayLFRatio = reverbprops->DecayLFRatio;
+            slot->DecayHFRatio = reverbprops->DecayHFRatio;
+            slot->DecayHFLimit = reverbprops->DecayHFLimit;
+        }
     }
 
     EffectState *state{props->State.release()};
@@ -1509,33 +1521,24 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
     voice->mDirect.Buffer = Device->Dry.Buffer;
     std::array<EffectSlot*,MaxSendCount> SendSlots{};
     std::array<float,MaxSendCount> RoomRolloff{};
-    std::bitset<MaxSendCount> UseDryAttnForRoom{0};
     for(uint i{0};i < NumSends;i++)
     {
         SendSlots[i] = props->Send[i].Slot;
         if(!SendSlots[i] || SendSlots[i]->EffectType == EffectSlotType::None)
+        {
             SendSlots[i] = nullptr;
-        else if(SendSlots[i]->AuxSendAuto)
+            voice->mSend[i].Buffer = {};
+        }
+        else
         {
             /* NOTE: Contrary to the EFX docs, the effect's room rolloff factor
              * applies to the selected distance model along with the source's
              * room rolloff factor, not necessarily the inverse distance model.
-             *
-             * Generic Software also applies these rolloff factors regardless
-             * of any setting. It doesn't seem to use the effect slot's send
-             * auto for anything, though as far as I understand, it's supposed
-             * to control whether the send gets the same gain/gainhf as the
-             * direct path (excluding the filter).
              */
             RoomRolloff[i] = props->RoomRolloffFactor + SendSlots[i]->RoomRolloff;
-        }
-        else
-            UseDryAttnForRoom.set(i);
 
-        if(!SendSlots[i])
-            voice->mSend[i].Buffer = {};
-        else
             voice->mSend[i].Buffer = SendSlots[i]->Wet.Buffer;
+        }
     }
 
     /* Transform source to listener space (convert to head relative) */
@@ -1670,28 +1673,34 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
     std::array<GainTriplet,MaxSendCount> WetGain{};
     for(uint i{0};i < NumSends;i++)
     {
-        WetGainBase[i] = std::clamp(WetGainBase[i]*WetCone, props->MinGain, props->MaxGain) *
+        const auto gain = std::clamp(WetGainBase[i]*WetCone, props->MinGain, props->MaxGain) *
             context->mParams.Gain;
-        /* If this effect slot's Auxiliary Send Auto is off, then use the dry
-         * path distance and cone attenuation, otherwise use the wet (room)
-         * path distance and cone attenuation. The send filter is used instead
-         * of the direct filter, regardless.
-         */
-        const bool use_room{!UseDryAttnForRoom.test(i)};
-        const float gain{use_room ? WetGainBase[i] : DryGainBase};
         WetGain[i].Base = std::min(gain * props->Send[i].Gain, GainMixMax);
-        WetGain[i].HF = (use_room ? WetConeHF : ConeHF) * props->Send[i].GainHF;
+        WetGain[i].HF = WetConeHF * props->Send[i].GainHF;
         WetGain[i].LF = props->Send[i].GainLF;
     }
 
     /* Distance-based air absorption and initial send decay. */
     if(Distance > props->RefDistance) LIKELY
     {
-        const float distance_base{(Distance-props->RefDistance) * props->RolloffFactor};
-        const float distance_meters{distance_base * context->mParams.MetersPerUnit};
-        const float dryabsorb{distance_meters * props->AirAbsorptionFactor};
-        if(dryabsorb > std::numeric_limits<float>::epsilon())
-            DryGain.HF *= std::pow(context->mParams.AirAbsorptionGainHF, dryabsorb);
+        /* FIXME: In keeping with EAX, the base air absorption gain should be
+         * taken from the reverb property in the "primary fx slot" when it has
+         * a reverb effect and the environment flag set, and be applied to the
+         * direct path and all environment sends, rather than each path using
+         * the air absorption gain associated with the given slot's effect. At
+         * this point in the mixer, and even in EFX itself, there's no concept
+         * of a "primary fx slot" so it's unclear which effect slot should be
+         * checked.
+         *
+         * The HF reference is also intended to be handled the same way, but
+         * again, there's no concept of a "primary fx slot" here and no way to
+         * know which effect slot to look at for the reference frequency.
+         */
+        const auto distance_units = float{(Distance-props->RefDistance) * props->RolloffFactor};
+        const auto distance_meters = float{distance_units * context->mParams.MetersPerUnit};
+        const auto absorb = float{distance_meters * props->AirAbsorptionFactor};
+        if(absorb > std::numeric_limits<float>::epsilon())
+            DryGain.HF *= std::pow(context->mParams.AirAbsorptionGainHF, absorb);
 
         /* If the source's Auxiliary Send Filter Gain Auto is off, no extra
          * adjustment is applied to the send gains.
@@ -1701,18 +1710,9 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
             if(!SendSlots[i] || !(SendSlots[i]->DecayTime > 0.0f))
                 continue;
 
-            if(distance_meters > std::numeric_limits<float>::epsilon())
-                WetGain[i].HF *= std::pow(SendSlots[i]->AirAbsorptionGainHF, distance_meters);
-
-            /* If this effect slot's Auxiliary Send Auto is off, don't apply
-             * the automatic initial reverb decay.
-             *
-             * NOTE: Generic Software applies the initial decay regardless of
-             * this setting. It doesn't seem to use it for anything, only the
-             * source's send filter gain auto flag affects this.
-             */
-            if(!SendSlots[i]->AuxSendAuto)
-                continue;
+            if(SendSlots[i]->AirAbsorptionGainHF < 1.0f
+                && absorb > std::numeric_limits<float>::epsilon())
+                WetGain[i].HF *= std::pow(SendSlots[i]->AirAbsorptionGainHF, absorb);
 
             const float DecayDistance{SendSlots[i]->DecayTime * SpeedOfSoundMetersPerSec};
 
@@ -1726,7 +1726,7 @@ void CalcAttnSourceParams(Voice *voice, const VoiceProps *props, const ContextBa
              * with the reverb and source rolloff parameters.
              */
             const float baseAttn{DryAttnBase};
-            const float fact{distance_base / DecayDistance};
+            const float fact{distance_meters / DecayDistance};
             const float gain{std::pow(ReverbDecayGain, fact)*(1.0f-baseAttn) + baseAttn};
             WetGain[i].Base *= gain;
         }
@@ -1966,30 +1966,33 @@ void ProcessContexts(DeviceBase *device, const uint SamplesToDo)
         nanoseconds{seconds{device->mSamplesDone.load(std::memory_order_relaxed)}}/
         device->Frequency};
 
-    for(ContextBase *ctx : *device->mContexts.load(std::memory_order_acquire))
+    auto proc_context = [SamplesToDo,curtime](ContextBase *ctx)
     {
         const auto auxslotspan = al::span{*ctx->mActiveAuxSlots.load(std::memory_order_acquire)};
         const auto auxslots = auxslotspan.first(auxslotspan.size()>>1);
         const auto sorted_slots = auxslotspan.last(auxslotspan.size()>>1);
-        const al::span<Voice*> voices{ctx->getVoicesSpanAcquired()};
+        const auto voices = ctx->getVoicesSpanAcquired();
 
         /* Process pending property updates for objects on the context. */
         ProcessParamUpdates(ctx, auxslots, sorted_slots, voices);
 
         /* Clear auxiliary effect slot mixing buffers. */
-        for(EffectSlot *slot : auxslots)
+        auto clear_wetbuffers = [](EffectSlot *slot)
         {
-            for(auto &buffer : slot->Wet.Buffer)
-                buffer.fill(0.0f);
-        }
+            auto clear_buffer = [](const FloatBufferSpan buffer)
+            { std::fill(buffer.begin(), buffer.end(), 0.0f); };
+            std::for_each(slot->Wet.Buffer.begin(), slot->Wet.Buffer.end(), clear_buffer);
+        };
+        std::for_each(auxslots.begin(), auxslots.end(), clear_wetbuffers);
 
         /* Process voices that have a playing source. */
-        for(Voice *voice : voices)
+        auto proc_voice = [ctx,curtime,SamplesToDo](Voice *voice)
         {
             const Voice::State vstate{voice->mPlayState.load(std::memory_order_acquire)};
             if(vstate != Voice::Stopped && vstate != Voice::Pending)
                 voice->mix(vstate, ctx, curtime, SamplesToDo);
-        }
+        };
+        std::for_each(voices.begin(), voices.end(), proc_voice);
 
         /* Process effects. */
         if(!auxslots.empty())
@@ -2000,60 +2003,54 @@ void ProcessContexts(DeviceBase *device, const uint SamplesToDo)
              */
             if(!sorted_slots[0])
             {
-                /* First, copy the slots to the sorted list, then partition the
-                 * sorted list so that all slots without a target slot go to
-                 * the end.
+                /* First, copy the slots to the sorted list and partition them,
+                 * so that all slots without a target slot go to the end.
                  */
-                std::copy(auxslots.begin(), auxslots.end(), sorted_slots.begin());
-                auto split_point = std::partition(sorted_slots.begin(), sorted_slots.end(),
-                    [](const EffectSlot *slot) noexcept -> bool
-                    { return slot->Target != nullptr; });
+                auto has_target = [](const EffectSlot *slot) noexcept -> bool
+                { return slot->Target != nullptr; };
+                auto split_point = std::partition_copy(auxslots.rbegin(), auxslots.rend(),
+                    sorted_slots.begin(), sorted_slots.rbegin(), has_target).first;
                 /* There must be at least one slot without a slot target. */
                 assert(split_point != sorted_slots.end());
 
-                /* Simple case: no more than 1 slot has a target slot. Either
-                 * all slots go right to the output, or the remaining one must
-                 * target an already-partitioned slot.
+                /* Starting from the back of the sorted list, continue
+                 * partitioning the front of the list given each target until
+                 * all targets are accounted for. This ensures all slots
+                 * without a target go last, all slots directly targeting those
+                 * last slots go second-to-last, all slots directly targeting
+                 * those second-last slots go third-to-last, etc.
                  */
-                if(split_point - sorted_slots.begin() > 1)
+                auto next_target = sorted_slots.end();
+                while(std::distance(sorted_slots.begin(), split_point) > 1)
                 {
-                    /* At least two slots target other slots. Starting from the
-                     * back of the sorted list, continue partitioning the front
-                     * of the list given each target until all targets are
-                     * accounted for. This ensures all slots without a target
-                     * go last, all slots directly targeting those last slots
-                     * go second-to-last, all slots directly targeting those
-                     * second-last slots go third-to-last, etc.
+                    /* This shouldn't happen, but if there's unsorted slots
+                     * left that don't target any sorted slots, they can't
+                     * contribute to the output, so leave them.
                      */
-                    auto next_target = sorted_slots.end();
-                    do {
-                        /* This shouldn't happen, but if there's unsorted slots
-                         * left that don't target any sorted slots, they can't
-                         * contribute to the output, so leave them.
-                         */
-                        if(next_target == split_point) UNLIKELY
-                            break;
+                    if(next_target == split_point) UNLIKELY
+                        break;
 
-                        --next_target;
-                        split_point = std::partition(sorted_slots.begin(), split_point,
-                            [next_target](const EffectSlot *slot) noexcept -> bool
-                            { return slot->Target != *next_target; });
-                    } while(split_point - sorted_slots.begin() > 1);
+                    --next_target;
+                    auto not_next = [next_target](const EffectSlot *slot) noexcept -> bool
+                    { return slot->Target != *next_target; };
+                    split_point = std::partition(sorted_slots.begin(), split_point, not_next);
                 }
             }
 
-            for(const EffectSlot *slot : sorted_slots)
+            auto proc_slot = [SamplesToDo](const EffectSlot *slot)
             {
                 EffectState *state{slot->mEffectState.get()};
                 state->process(SamplesToDo, slot->Wet.Buffer, state->mOutTarget);
-            }
+            };
+            std::for_each(sorted_slots.begin(), sorted_slots.end(), proc_slot);
         }
 
         /* Signal the event handler if there are any events to read. */
-        RingBuffer *ring{ctx->mAsyncEvents.get()};
-        if(ring->readSpace() > 0)
+        if(RingBuffer *ring{ctx->mAsyncEvents.get()}; ring->readSpace() > 0)
             ctx->mEventSem.post();
-    }
+    };
+    const auto contexts = al::span{*device->mContexts.load(std::memory_order_acquire)};
+    std::for_each(contexts.begin(), contexts.end(), proc_context);
 }
 
 

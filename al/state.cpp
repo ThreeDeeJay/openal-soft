@@ -54,8 +54,6 @@
 #include "strutils.h"
 
 #ifdef ALSOFT_EAX
-#include "alc/device.h"
-
 #include "eax/globals.h"
 #include "eax/x_ram.h"
 #endif // ALSOFT_EAX
@@ -621,6 +619,9 @@ void UpdateContextProps(ALCcontext *context)
     props->DopplerFactor = context->mDopplerFactor;
     props->DopplerVelocity = context->mDopplerVelocity;
     props->SpeedOfSound = context->mSpeedOfSound;
+#ifdef ALSOFT_EAX
+    props->DistanceFactor = context->eaxGetDistanceFactor();
+#endif
 
     props->SourceDistanceModel = context->mSourceDistanceModel;
     props->mDistanceModel = context->mDistanceModel;

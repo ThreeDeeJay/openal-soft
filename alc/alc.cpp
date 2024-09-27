@@ -271,6 +271,12 @@ BackendFactory *CaptureFactory{};
 
 [[nodiscard]] constexpr auto GetDefaultName() noexcept { return "Creative SB Audigy\0"; }
 
+#ifdef _WIN32
+[[nodiscard]] constexpr auto GetDevicePrefix() noexcept { return "OpenAL Soft on "sv; }
+#else
+[[nodiscard]] constexpr auto GetDevicePrefix() noexcept { return std::string_view{}; }
+#endif
+
 /************************************************
  * Global variables
  ************************************************/
@@ -725,6 +731,10 @@ void ProbeAllDevicesList()
     else
     {
         alcAllDevicesArray = PlaybackFactory->enumerate(BackendType::Playback);
+        if(const auto prefix = GetDevicePrefix(); !prefix.empty())
+            std::for_each(alcAllDevicesArray.begin(), alcAllDevicesArray.end(),
+                [prefix](std::string &name) { name.insert(0, prefix); });
+
         decltype(alcAllDevicesList){}.swap(alcAllDevicesList);
         if(alcAllDevicesArray.empty())
             alcAllDevicesList += '\0';
@@ -745,6 +755,10 @@ void ProbeCaptureDeviceList()
     else
     {
         alcCaptureDeviceArray = CaptureFactory->enumerate(BackendType::Capture);
+        if(const auto prefix = GetDevicePrefix(); !prefix.empty())
+            std::for_each(alcCaptureDeviceArray.begin(), alcCaptureDeviceArray.end(),
+                [prefix](std::string &name) { name.insert(0, prefix); });
+
         decltype(alcCaptureDeviceList){}.swap(alcCaptureDeviceList);
         if(alcCaptureDeviceArray.empty())
             alcCaptureDeviceList += '\0';
@@ -2034,7 +2048,7 @@ ALC_API const ALCchar* ALC_APIENTRY alcGetString(ALCdevice *Device, ALCenum para
             else
             {
                 std::lock_guard<std::mutex> statelock{dev->StateLock};
-                value = dev->DeviceName.c_str();
+                value = dev->mDeviceName.c_str();
             }
         }
         else
@@ -2052,7 +2066,7 @@ ALC_API const ALCchar* ALC_APIENTRY alcGetString(ALCdevice *Device, ALCenum para
             else
             {
                 std::lock_guard<std::mutex> statelock{dev->StateLock};
-                value = dev->DeviceName.c_str();
+                value = dev->mDeviceName.c_str();
             }
         }
         else
@@ -2912,6 +2926,13 @@ ALC_API ALCdevice* ALC_APIENTRY alcOpenDevice(const ALCchar *deviceName) noexcep
             || al::starts_with(devname, "'("sv)
             || al::case_compare(devname, "openal-soft"sv) == 0)
             devname = {};
+        else
+        {
+            const auto prefix = GetDevicePrefix();
+            if(!prefix.empty() && devname.size() > prefix.size()
+                && al::starts_with(devname, prefix))
+                devname = devname.substr(prefix.size());
+        }
     }
     else
         TRACE("Opening default playback device\n");
@@ -2948,6 +2969,7 @@ ALC_API ALCdevice* ALC_APIENTRY alcOpenDevice(const ALCchar *deviceName) noexcep
         auto backend = PlaybackFactory->createBackend(device.get(), BackendType::Playback);
         std::lock_guard<std::recursive_mutex> listlock{ListLock};
         backend->open(devname);
+        device->mDeviceName = std::string{GetDevicePrefix()}+backend->mDeviceName;
         device->Backend = std::move(backend);
     }
     catch(al::backend_exception &e) {
@@ -2963,11 +2985,20 @@ ALC_API ALCdevice* ALC_APIENTRY alcOpenDevice(const ALCchar *deviceName) noexcep
         return device->configValue<std::string>("game_compat", optname);
     };
     if(auto overrideopt = checkopt("__ALSOFT_VENDOR_OVERRIDE", "vendor-override"sv))
-        device->mVendorOverride = *overrideopt;
+    {
+        device->mVendorOverride = std::move(*overrideopt);
+        TRACE("Overriding vendor string: \"%s\"\n", device->mVendorOverride.c_str());
+    }
     if(auto overrideopt = checkopt("__ALSOFT_VERSION_OVERRIDE", "version-override"sv))
-        device->mVersionOverride = *overrideopt;
+    {
+        device->mVersionOverride = std::move(*overrideopt);
+        TRACE("Overriding version string: \"%s\"\n", device->mVersionOverride.c_str());
+    }
     if(auto overrideopt = checkopt("__ALSOFT_RENDERER_OVERRIDE", "renderer-override"sv))
-        device->mRendererOverride = *overrideopt;
+    {
+        device->mRendererOverride = std::move(*overrideopt);
+        TRACE("Overriding renderer string: \"%s\"\n", device->mRendererOverride.c_str());
+    }
 
     {
         std::lock_guard<std::recursive_mutex> listlock{ListLock};
@@ -2975,7 +3006,7 @@ ALC_API ALCdevice* ALC_APIENTRY alcOpenDevice(const ALCchar *deviceName) noexcep
         DeviceList.emplace(iter, device.get());
     }
 
-    TRACE("Created device %p, \"%s\"\n", voidp{device.get()}, device->DeviceName.c_str());
+    TRACE("Created device %p, \"%s\"\n", voidp{device.get()}, device->mDeviceName.c_str());
     return device.release();
 }
 
@@ -3056,6 +3087,13 @@ ALC_API ALCdevice* ALC_APIENTRY alcCaptureOpenDevice(const ALCchar *deviceName, 
         if(al::case_compare(devname, GetDefaultName()) == 0
             || al::case_compare(devname, "openal-soft"sv) == 0)
             devname = {};
+        else
+        {
+            const auto prefix = GetDevicePrefix();
+            if(!prefix.empty() && devname.size() > prefix.size()
+                && al::starts_with(devname, prefix))
+                devname = devname.substr(prefix.size());
+        }
     }
     else
         TRACE("Opening default capture device\n");
@@ -3093,6 +3131,7 @@ ALC_API ALCdevice* ALC_APIENTRY alcCaptureOpenDevice(const ALCchar *deviceName, 
         auto backend = CaptureFactory->createBackend(device.get(), BackendType::Capture);
         std::lock_guard<std::recursive_mutex> listlock{ListLock};
         backend->open(devname);
+        device->mDeviceName = std::string{GetDevicePrefix()}+backend->mDeviceName;
         device->Backend = std::move(backend);
     }
     catch(al::backend_exception &e) {
@@ -3109,7 +3148,7 @@ ALC_API ALCdevice* ALC_APIENTRY alcCaptureOpenDevice(const ALCchar *deviceName, 
     }
     device->mDeviceState = DeviceState::Configured;
 
-    TRACE("Created capture device %p, \"%s\"\n", voidp{device.get()}, device->DeviceName.c_str());
+    TRACE("Created capture device %p, \"%s\"\n", voidp{device.get()}, device->mDeviceName.c_str());
     return device.release();
 }
 
@@ -3267,6 +3306,7 @@ ALC_API ALCdevice* ALC_APIENTRY alcLoopbackOpenDeviceSOFT(const ALCchar *deviceN
         auto backend = LoopbackBackendFactory::getFactory().createBackend(device.get(),
             BackendType::Playback);
         backend->open("Loopback");
+        device->mDeviceName = std::string{GetDevicePrefix()}+backend->mDeviceName;
         device->Backend = std::move(backend);
     }
     catch(al::backend_exception &e) {
@@ -3478,6 +3518,13 @@ FORCE_ALIGN ALCboolean ALC_APIENTRY alcReopenDeviceSOFT(ALCdevice *device,
         }
         if(al::case_compare(devname, GetDefaultName()) == 0)
             devname = {};
+        else
+        {
+            const auto prefix = GetDevicePrefix();
+            if(!prefix.empty() && devname.size() > prefix.size()
+                && al::starts_with(devname, prefix))
+                devname = devname.substr(prefix.size());
+        }
     }
 
     /* Force the backend device to stop first since we're opening another one. */
@@ -3516,24 +3563,34 @@ FORCE_ALIGN ALCboolean ALC_APIENTRY alcReopenDeviceSOFT(ALCdevice *device,
         return ALC_FALSE;
     }
     listlock.unlock();
+    dev->mDeviceName = std::string{GetDevicePrefix()}+newbackend->mDeviceName;
     dev->Backend = std::move(newbackend);
     dev->mDeviceState = DeviceState::Unprepared;
-    TRACE("Reopened device %p, \"%s\"\n", voidp{dev.get()}, dev->DeviceName.c_str());
+    TRACE("Reopened device %p, \"%s\"\n", voidp{dev.get()}, dev->mDeviceName.c_str());
 
-    std::string{}.swap(device->mVendorOverride);
-    std::string{}.swap(device->mVersionOverride);
-    std::string{}.swap(device->mRendererOverride);
-    auto checkopt = [&device](const char *envname, const std::string_view optname)
+    std::string{}.swap(dev->mVendorOverride);
+    std::string{}.swap(dev->mVersionOverride);
+    std::string{}.swap(dev->mRendererOverride);
+    auto checkopt = [&dev](const char *envname, const std::string_view optname)
     {
         if(auto optval = al::getenv(envname)) return optval;
-        return device->configValue<std::string>("game_compat", optname);
+        return dev->configValue<std::string>("game_compat", optname);
     };
     if(auto overrideopt = checkopt("__ALSOFT_VENDOR_OVERRIDE", "vendor-override"sv))
-        device->mVendorOverride = *overrideopt;
+    {
+        dev->mVendorOverride = std::move(*overrideopt);
+        TRACE("Overriding vendor string: \"%s\"\n", dev->mVendorOverride.c_str());
+    }
     if(auto overrideopt = checkopt("__ALSOFT_VERSION_OVERRIDE", "version-override"sv))
-        device->mVersionOverride = *overrideopt;
+    {
+        dev->mVersionOverride = std::move(*overrideopt);
+        TRACE("Overriding version string: \"%s\"\n", dev->mVersionOverride.c_str());
+    }
     if(auto overrideopt = checkopt("__ALSOFT_RENDERER_OVERRIDE", "renderer-override"sv))
-        device->mRendererOverride = *overrideopt;
+    {
+        dev->mRendererOverride = std::move(*overrideopt);
+        TRACE("Overriding renderer string: \"%s\"\n", dev->mRendererOverride.c_str());
+    }
 
     /* Always return true even if resetting fails. It shouldn't fail, but this
      * is primarily to avoid confusion by the app seeing the function return
@@ -3561,25 +3618,25 @@ FORCE_ALIGN ALCenum ALC_APIENTRY alcEventIsSupportedSOFT(ALCenum eventType, ALCe
     {
         WARN("Invalid event type: 0x%04x\n", eventType);
         alcSetError(nullptr, ALC_INVALID_ENUM);
-        return ALC_EVENT_NOT_SUPPORTED_SOFT;
+        return ALC_FALSE;
     }
 
     auto supported = alc::EventSupport::NoSupport;
     switch(deviceType)
     {
-        case ALC_PLAYBACK_DEVICE_SOFT:
-            if(PlaybackFactory)
-                supported = PlaybackFactory->queryEventSupport(*etype, BackendType::Playback);
-            break;
+    case ALC_PLAYBACK_DEVICE_SOFT:
+        if(PlaybackFactory)
+            supported = PlaybackFactory->queryEventSupport(*etype, BackendType::Playback);
+        return al::to_underlying(supported);
 
-        case ALC_CAPTURE_DEVICE_SOFT:
-            if(CaptureFactory)
-                supported = CaptureFactory->queryEventSupport(*etype, BackendType::Capture);
-            break;
+    case ALC_CAPTURE_DEVICE_SOFT:
+        if(CaptureFactory)
+            supported = CaptureFactory->queryEventSupport(*etype, BackendType::Capture);
+        return al::to_underlying(supported);
 
-        default:
-            WARN("Invalid device type: 0x%04x\n", deviceType);
-            alcSetError(nullptr, ALC_INVALID_ENUM);
+    default:
+        WARN("Invalid device type: 0x%04x\n", deviceType);
+        alcSetError(nullptr, ALC_INVALID_ENUM);
     }
-    return al::to_underlying(supported);
+    return ALC_FALSE;
 }
